@@ -18,6 +18,10 @@ import { OcrService } from '../../core/services/ocr.service';
         ></app-camera>
       </div>
       <div class="details-section">
+        <div class="actions">
+          <button (click)="manualScan()">Manual Scan</button>
+          <button (click)="toggleDebug()">{{ debugMode() ? 'Hide Debug' : 'Show Debug' }}</button>
+        </div>
         <app-card-details
           [info]="cardInfo()"
           [status]="status()"
@@ -42,6 +46,16 @@ import { OcrService } from '../../core/services/ocr.service';
           grid-template-columns: 2fr 1fr;
         }
       }
+      .actions {
+        display: flex;
+        gap: 0.5rem;
+        margin-bottom: 1rem;
+      }
+      .actions button {
+        flex: 1;
+        padding: 0.5rem;
+        cursor: pointer;
+      }
     `,
   ],
 })
@@ -52,6 +66,7 @@ export class ScannerComponent implements OnDestroy {
   cardInfo = signal<CardInfo | null>(null);
   status = signal<string>('Initializing...');
   logs = signal<string[]>([]);
+  debugMode = signal(false);
 
   private videoElement: HTMLVideoElement | null = null;
   private canvasElement: HTMLCanvasElement | null = null;
@@ -68,6 +83,55 @@ export class ScannerComponent implements OnDestroy {
   addLog(message: string) {
     const timestamp = new Date().toLocaleTimeString();
     this.logs.update((logs) => [`[${timestamp}] ${message}`, ...logs].slice(0, 50));
+  }
+
+  toggleDebug() {
+    this.debugMode.update((v) => !v);
+    this.addLog(`Debug mode ${this.debugMode() ? 'enabled' : 'disabled'}`);
+  }
+
+  async manualScan() {
+    if (!this.videoElement || !this.opencvService.isReady()) return;
+
+    this.addLog('Manual scan triggered...');
+
+    const video = this.videoElement;
+    const width = video.videoWidth;
+    const height = video.videoHeight;
+
+    // Create a canvas to draw the frame
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    ctx.drawImage(video, 0, 0, width, height);
+
+    // Calculate center crop based on card aspect ratio (63/88 ~= 0.716)
+    // Let's say we want to capture a good chunk of the height, maybe 80%?
+    const cardRatio = 63 / 88;
+
+    let cropHeight = height * 0.8;
+    let cropWidth = cropHeight * cardRatio;
+
+    // Ensure width doesn't exceed video width
+    if (cropWidth > width) {
+      cropWidth = width * 0.8;
+      cropHeight = cropWidth / cardRatio;
+    }
+
+    const x = (width - cropWidth) / 2;
+    const y = (height - cropHeight) / 2;
+
+    // Crop
+    const cropCanvas = document.createElement('canvas');
+    cropCanvas.width = cropWidth;
+    cropCanvas.height = cropHeight;
+    const cropCtx = cropCanvas.getContext('2d');
+    cropCtx?.drawImage(canvas, x, y, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
+
+    this.processCardImage(cropCanvas);
   }
 
   constructor() {
@@ -178,13 +242,31 @@ export class ScannerComponent implements OnDestroy {
       cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT);
       cv.Canny(blur, edges, 75, 200);
 
+      if (this.debugMode()) {
+        // Draw edges to canvas to visualize what computer sees
+        // We need to convert single channel edges to RGBA for canvas
+        const debugMat = new cv.Mat();
+        cv.cvtColor(edges, debugMat, cv.COLOR_GRAY2RGBA);
+        const imgData = new ImageData(
+          new Uint8ClampedArray(debugMat.data),
+          debugMat.cols,
+          debugMat.rows
+        );
+        ctx.putImageData(imgData, 0, 0);
+        debugMat.delete();
+      }
+
       // Find Contours
       contours = new cv.MatVector();
       hierarchy = new cv.Mat();
       cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-      let maxArea = 0;
+      let maxScore = -1;
       let bestContour = null;
+      let bestScoreDetails = '';
+
+      const centerX = video.videoWidth / 2;
+      const centerY = video.videoHeight / 2;
 
       for (let i = 0; i < contours.size(); ++i) {
         let cnt = contours.get(i);
@@ -198,13 +280,64 @@ export class ScannerComponent implements OnDestroy {
 
         let peri = cv.arcLength(cnt, true);
         let approx = new cv.Mat();
-        cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
+        // Looser approximation (0.04 instead of 0.02) to handle slightly curved or skewed cards
+        cv.approxPolyDP(cnt, approx, 0.04 * peri, true);
 
         if (approx.rows === 4) {
-          // Check aspect ratio?
-          // For now, just finding the largest quad is a good start
-          if (area > maxArea) {
-            maxArea = area;
+          // Calculate score based on area and distance from center
+          // We want large area and close to center
+
+          const moments = cv.moments(cnt, false);
+          const cx = moments.m10 / moments.m00;
+          const cy = moments.m01 / moments.m00;
+
+          const dist = Math.sqrt(Math.pow(cx - centerX, 2) + Math.pow(cy - centerY, 2));
+
+          // Heuristic: Area / (Distance + 1)
+          // Or just prioritize area but penalize distance slightly
+          // Let's say we want it within the center 50% of screen
+
+          // Simple score: Area - Distance * Factor
+          // Factor depends on units. Area is in pixels^2, Distance in pixels.
+          // Let's normalize.
+
+          // New Heuristic:
+          // 1. Area Score: Ratio of contour area to screen area (0 to 1)
+          // 2. Center Score: 1 - (Distance / MaxDistance) (0 to 1)
+          // 3. Shape Score: Aspect ratio check (Pokemon cards are ~0.71)
+
+          const screenArea = video.videoWidth * video.videoHeight;
+          const areaScore = area / screenArea; // e.g. 0.5 if takes up half screen
+
+          const maxDist = Math.sqrt(Math.pow(centerX, 2) + Math.pow(centerY, 2));
+          const centerScore = 1 - dist / maxDist; // 1 at center, 0 at corner
+
+          // Aspect Ratio Check
+          // Use bounding rect for rough aspect ratio
+          const rect = cv.boundingRect(cnt);
+          const aspectRatio = rect.width / rect.height;
+          const targetRatio = 0.71; // 63/88
+          const ratioDiff = Math.abs(aspectRatio - targetRatio);
+          const shapeScore = 1 - Math.min(ratioDiff, 1); // 1 is perfect match
+
+          // Combined Score
+          // We want big cards (area), centered (center), correct shape (shape)
+          // Weight area heavily so we don't ignore big cards just because they are slightly off-center
+          const score = areaScore * 0.6 + centerScore * 0.2 + shapeScore * 0.2;
+
+          // Log details for debugging
+          if (this.debugMode() && i % 5 === 0) {
+            // Log occasionally to avoid spam
+            console.log(
+              `Contour ${i}: Area=${areaScore.toFixed(2)}, Center=${centerScore.toFixed(
+                2
+              )}, Shape=${shapeScore.toFixed(2)}, Score=${score.toFixed(2)}`
+            );
+          }
+
+          if (score > maxScore) {
+            maxScore = score;
+            bestScoreDetails = `A:${areaScore.toFixed(2)} C:${centerScore.toFixed(2)} S:${shapeScore.toFixed(2)}`;
             if (bestContour) bestContour.delete();
             bestContour = approx; // Keep the approx
           } else {
@@ -217,7 +350,7 @@ export class ScannerComponent implements OnDestroy {
       }
 
       if (bestContour) {
-        this.status.set('Card Detected! Tracking...');
+        this.status.set(`Detected! ${maxScore.toFixed(2)} [${bestScoreDetails}]`);
         // Draw contour
         // We need to convert bestContour (Mat) to points for drawing on canvas overlay
         // Or we can draw on 'dst' and show that, but we want overlay on video.
@@ -237,7 +370,7 @@ export class ScannerComponent implements OnDestroy {
 
           // Trigger OCR if enough time passed
           const now = Date.now();
-          if (now - this.lastOcrTime > this.OCR_INTERVAL) {
+          if (now - this.lastOcrTime > this.OCR_INTERVAL && !this.debugMode()) {
             this.lastOcrTime = now;
             this.status.set('Processing OCR...');
             this.addLog('Card stable. Starting OCR processing...');
@@ -246,7 +379,7 @@ export class ScannerComponent implements OnDestroy {
         }
         bestContour.delete();
       } else {
-        this.status.set('Scanning... No card detected.');
+        this.status.set(`Scanning... Best: ${maxScore.toFixed(2)} [${bestScoreDetails || 'None'}]`);
       }
     } catch (err) {
       console.error('OpenCV Error', err);
@@ -339,15 +472,22 @@ export class ScannerComponent implements OnDestroy {
     const imgData = new ImageData(new Uint8ClampedArray(dst.data), dst.cols, dst.rows);
     outCanvas.getContext('2d')?.putImageData(imgData, 0, 0);
 
-    // Save the image for preview
-    const cardImage = outCanvas.toDataURL('image/jpeg');
-
     // Cleanup
     src.delete();
     dst.delete();
     M.delete();
     srcTri.delete();
     dstTri.delete();
+
+    this.processCardImage(outCanvas);
+  }
+
+  async processCardImage(cardCanvas: HTMLCanvasElement) {
+    const width = cardCanvas.width;
+    const height = cardCanvas.height;
+
+    // Save the image for preview
+    const cardImage = cardCanvas.toDataURL('image/jpeg');
 
     // Now we have a flat card image in outCanvas
     // We can crop specific regions
@@ -358,7 +498,7 @@ export class ScannerComponent implements OnDestroy {
     topCanvas.height = height * 0.15;
     topCanvas
       .getContext('2d')
-      ?.drawImage(outCanvas, 0, 0, width, height * 0.15, 0, 0, width, height * 0.15);
+      ?.drawImage(cardCanvas, 0, 0, width, height * 0.15, 0, 0, width, height * 0.15);
 
     // Bottom Region (Set info) - Bottom 10%
     const bottomCanvas = document.createElement('canvas');
@@ -366,7 +506,18 @@ export class ScannerComponent implements OnDestroy {
     bottomCanvas.height = height * 0.1;
     bottomCanvas
       .getContext('2d')
-      ?.drawImage(outCanvas, 0, height * 0.9, width, height * 0.1, 0, 0, width, height * 0.1);
+      ?.drawImage(cardCanvas, 0, height * 0.9, width, height * 0.1, 0, 0, width, height * 0.1);
+
+    // Save debug images to local storage or log them (as data URLs)
+    if (this.debugMode()) {
+      console.log('Top Image:', topCanvas.toDataURL('image/jpeg'));
+      console.log('Bottom Image:', bottomCanvas.toDataURL('image/jpeg'));
+      this.addLog('Debug: Logged Top/Bottom images to console');
+    }
+
+    this.addLog(
+      `Sending to OCR. Top: ${topCanvas.width}x${topCanvas.height}, Bottom: ${bottomCanvas.width}x${bottomCanvas.height}`
+    );
 
     try {
       // Run OCR in parallel
@@ -386,7 +537,11 @@ export class ScannerComponent implements OnDestroy {
     const info: CardInfo = { ...this.cardInfo(), image: cardImage };
 
     // Parse Top
-    const topLines = topResult.lines
+    const topText = topResult?.text || '';
+    const topConf = Math.round(topResult?.confidence || 0);
+    this.addLog(`Raw Top OCR (${topConf}%): "${topText.replace(/\n/g, ' ')}"`);
+
+    const topLines = (topResult?.lines || [])
       .map((l: any) => l.text.trim())
       .filter((t: string) => t.length > 0);
     console.log('Top OCR:', topLines);
@@ -416,7 +571,11 @@ export class ScannerComponent implements OnDestroy {
     }
 
     // Parse Bottom
-    const bottomLines = bottomResult.lines
+    const rawBottomText = bottomResult?.text || '';
+    const bottomConf = Math.round(bottomResult?.confidence || 0);
+    this.addLog(`Raw Bottom OCR (${bottomConf}%): "${rawBottomText.replace(/\n/g, ' ')}"`);
+
+    const bottomLines = (bottomResult?.lines || [])
       .map((l: any) => l.text.trim())
       .filter((t: string) => t.length > 0);
     console.log('Bottom OCR:', bottomLines);

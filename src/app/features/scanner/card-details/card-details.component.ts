@@ -19,9 +19,6 @@ export interface CardInfo {
   template: `
     <div class="card-details">
       <h2>Card Details</h2>
-      <div class="libraries-info">
-        <small>Powered by OpenCV.js & Tesseract.js</small>
-      </div>
       <div class="status-bar">Status: {{ status() }}</div>
 
       @if (info()) { @if (info()?.image) {

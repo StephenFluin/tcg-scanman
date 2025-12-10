@@ -23,6 +23,9 @@ import { CommonModule } from '@angular/common';
       <div class="video-wrapper">
         <video #video autoplay playsinline muted (loadedmetadata)="onVideoLoaded()"></video>
         <canvas #canvas></canvas>
+        <div class="overlay-guide">
+          <div class="card-outline"></div>
+        </div>
       </div>
 
       <div class="controls">
@@ -62,6 +65,24 @@ import { CommonModule } from '@angular/common';
         width: 100%;
         height: 100%;
         pointer-events: none;
+      }
+      .overlay-guide {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .card-outline {
+        width: 200px;
+        height: 280px; /* 63mm x 88mm ratio approx 1:1.4 */
+        border: 2px dashed rgba(255, 255, 255, 0.3);
+        border-radius: 12px;
+        position: relative;
       }
       .controls {
         margin-top: 1rem;
@@ -104,7 +125,8 @@ export class CameraComponent implements OnInit, OnDestroy {
 
   async ngOnInit() {
     await this.getDevices();
-    await this.startCamera();
+    const savedDeviceId = localStorage.getItem('preferredCameraId');
+    await this.startCamera(savedDeviceId || undefined);
   }
 
   ngOnDestroy() {
@@ -176,6 +198,7 @@ export class CameraComponent implements OnInit, OnDestroy {
     const nextIndex = (currentIndex + 1) % devices.length;
     const nextDevice = devices[nextIndex];
 
+    localStorage.setItem('preferredCameraId', nextDevice.deviceId);
     await this.startCamera(nextDevice.deviceId);
   }
 
