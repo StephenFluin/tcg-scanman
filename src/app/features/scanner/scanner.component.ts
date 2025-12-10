@@ -83,6 +83,10 @@ export class ScannerComponent implements OnDestroy {
   private lastOcrTime = 0;
   private readonly OCR_INTERVAL = 1000; // Run OCR every 1s if card detected
 
+  // Stability tracking
+  private detectionStabilityCount = 0;
+  private readonly STABILITY_THRESHOLD = 3; // Require 3 consecutive detections
+
   addLog(message: string) {
     const timestamp = new Date().toLocaleTimeString();
     this.logs.update((logs) => [`[${timestamp}] ${message}`, ...logs].slice(0, 50));
@@ -295,7 +299,7 @@ export class ScannerComponent implements OnDestroy {
     }
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    let src: any, gray: any, blur: any, edges: any, contours: any, hierarchy: any, approx: any;
+    let src: any, gray: any, binary: any, contours: any, hierarchy: any, approx: any;
 
     try {
       // 2. Draw Video to Processing Canvas (Hidden)
@@ -310,148 +314,214 @@ export class ScannerComponent implements OnDestroy {
       // 3. Initialize Mats
       src = cv.imread(pCanvas);
       gray = new cv.Mat();
-      blur = new cv.Mat();
-      edges = new cv.Mat();
+      binary = new cv.Mat();
       approx = new cv.Mat();
 
-      // 4. Pre-processing
+      // 4. Pre-processing - Convert to grayscale
       cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY, 0);
 
-      // HEAVY BLUR: This is critical. We use a large 7x7 kernel to "erase" the text
-      // and artwork inside the card. We only want the high-contrast card border to remain.
-      cv.GaussianBlur(gray, blur, new cv.Size(7, 7), 0, 0, cv.BORDER_DEFAULT);
+      // Use Gaussian blur to reduce noise more aggressively
+      cv.GaussianBlur(gray, gray, new cv.Size(9, 9), 0);
 
-      // CANNY EDGE DETECTION
-      // We switch back to Canny because it gives us thin lines to count corners.
-      // 30/100 are relatively low thresholds to ensure we catch the card border even in lower light.
-      cv.Canny(blur, edges, 30, 100);
+      // Use adaptive threshold instead of Canny to detect the card border better
+      // This works better for detecting solid rectangular objects like cards
+      cv.adaptiveThreshold(
+        gray,
+        binary,
+        255,
+        cv.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv.THRESH_BINARY_INV,
+        11,
+        2
+      );
 
-      // DILATION
-      // Thickens the edge lines to close small gaps (like where a finger might break the line).
-      // This ensures the card outline is a single continuous loop.
-      const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
-      cv.dilate(edges, edges, kernel);
+      // MORPHOLOGICAL CLOSING: Fill gaps and smooth the outline
+      // LARGER kernel = more aggressive smoothing of the card border
+      const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(15, 15));
+      cv.morphologyEx(binary, binary, cv.MORPH_CLOSE, kernel);
+      cv.dilate(binary, binary, kernel);
       kernel.delete();
+
+      // Optional: Debug View - See what the computer calculates
+      if (this.debugMode()) {
+        cv.imshow(pCanvas, binary);
+        ctx.drawImage(pCanvas, 0, 0, canvas.width, canvas.height);
+      }
 
       // 5. Find Contours
       contours = new cv.MatVector();
       hierarchy = new cv.Mat();
-      cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+      cv.findContours(binary, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-      let maxArea = 0;
+      let maxScore = 0;
       let bestPolyPoints: any[] | null = null;
 
-      // Ignore small noise (less than 5% of screen area)
-      const minArea = video.videoWidth * video.videoHeight * 0.05;
+      // Ignore small noise (less than 8% of screen area) and too large (more than 90%)
+      // Increased minArea to avoid detecting small features within the card
+      const minArea = video.videoWidth * video.videoHeight * 0.08;
+      const maxArea = video.videoWidth * video.videoHeight * 0.9;
+
+      if (this.debugMode()) {
+        console.log(`[DEBUG] Total contours found: ${contours.size()}`);
+        console.log(`[DEBUG] Area range: ${Math.floor(minArea)} - ${Math.floor(maxArea)}`);
+      }
+
+      // Pokemon card aspect ratio: 63mm x 88mm = 0.716
+      const cardAspectRatio = 63 / 88;
+      const aspectRatioTolerance = 0.25; // Tighter tolerance for better card detection
 
       for (let i = 0; i < contours.size(); ++i) {
         let cnt = contours.get(i);
         let area = cv.contourArea(cnt);
 
-        if (area < minArea) {
+        if (area < minArea || area > maxArea) {
           cnt.delete();
           continue;
         }
 
+        if (this.debugMode()) {
+          console.log(`[DEBUG] Contour ${i}: area=${Math.floor(area)}`);
+        }
+
         // 6. Polygon Approximation
-        // Simplify the contour. Epsilon is the "slack" allowed.
-        // 0.02 (2%) of perimeter is standard for rectangle detection.
+        // Epsilon balanced for 4 corners without oversimplification
         let peri = cv.arcLength(cnt, true);
-        cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
+        cv.approxPolyDP(cnt, approx, 0.04 * peri, true);
 
-        // STRICT FILTER 1: Must have exactly 4 corners
+        if (this.debugMode()) {
+          console.log(
+            `[DEBUG] Contour ${i}: approx has ${approx.rows} corners, isConvex=${cv.isContourConvex(
+              approx
+            )}`
+          );
+        }
+
+        // STRICT FILTER 1: Must have exactly 4 corners and be convex
         if (approx.rows === 4 && cv.isContourConvex(approx)) {
-          // STRICT FILTER 2: Cosine Check (Squareness)
-          // Ensure angles are close to 90 degrees.
-          // This rejects trapezoidal shadows or weird random shapes.
-          let maxCosine = 0;
-          const pts = approx.data32S; // [x1, y1, x2, y2, x3, y3, x4, y4]
-
-          for (let j = 0; j < 4; j++) {
-            const p0 = { x: pts[j * 2], y: pts[j * 2 + 1] };
-            const p1 = { x: pts[((j + 1) % 4) * 2], y: pts[((j + 1) % 4) * 2 + 1] };
-            const p2 = { x: pts[((j + 2) % 4) * 2], y: pts[((j + 2) % 4) * 2 + 1] };
-
-            const dx1 = p0.x - p1.x;
-            const dy1 = p0.y - p1.y;
-            const dx2 = p2.x - p1.x;
-            const dy2 = p2.y - p1.y;
-
-            // Dot Product to find angle
-            const dot = dx1 * dx2 + dy1 * dy2;
-            const mag1 = Math.sqrt(dx1 * dx1 + dy1 * dy1);
-            const mag2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
-
-            const cosine = Math.abs(dot / (mag1 * mag2));
-            maxCosine = Math.max(maxCosine, cosine);
+          if (this.debugMode()) {
+            console.log(`[DEBUG] Contour ${i}: ✓ PASSED 4 corners test`);
           }
 
-          // Cosine of 90° is 0. We allow deviation up to ~0.3 (approx 72°-108°)
-          if (maxCosine < 0.3) {
-            // STRICT FILTER 3: Aspect Ratio
-            const rect = cv.boundingRect(approx);
-            const ratio = rect.width / rect.height;
+          // STRICT FILTER 2: Check aspect ratio using minAreaRect
+          let rotatedRect = cv.minAreaRect(cnt);
+          let rw = rotatedRect.size.width;
+          let rh = rotatedRect.size.height;
+          let aspectRatio = Math.min(rw, rh) / Math.max(rw, rh);
 
-            // Pokemon cards: 0.71 (Portrait) or 1.4 (Landscape)
-            const isPortrait = ratio > 0.6 && ratio < 0.85;
-            const isLandscape = ratio > 1.2 && ratio < 1.6;
+          if (this.debugMode()) {
+            console.log(
+              `[DEBUG] Contour ${i}: aspect ratio=${aspectRatio.toFixed(
+                3
+              )} (target=${cardAspectRatio.toFixed(3)})`
+            );
+          }
 
-            if ((isPortrait || isLandscape) && area > maxArea) {
-              maxArea = area;
+          if (Math.abs(aspectRatio - cardAspectRatio) < aspectRatioTolerance) {
+            // STRICT FILTER 3: Check solidity (area / bounding box area)
+            let rectArea = rw * rh;
+            let solidity = area / rectArea;
 
-              // Extract points for drawing
-              bestPolyPoints = [
-                { x: pts[0], y: pts[1] },
-                { x: pts[2], y: pts[3] },
-                { x: pts[4], y: pts[5] },
-                { x: pts[6], y: pts[7] },
-              ];
+            if (this.debugMode()) {
+              console.log(`[DEBUG] Contour ${i}: solidity=${solidity.toFixed(3)}`);
+            }
+
+            if (solidity > 0.8) {
+              // Score based on area and solidity - prefer larger, more solid rectangles
+              let score = area * solidity;
+
+              if (this.debugMode()) {
+                console.log(`[DEBUG] Contour ${i}: ✓ PASSED all tests! Score=${Math.floor(score)}`);
+              }
+
+              if (score > maxScore) {
+                maxScore = score;
+                // Extract the 4 corner points from the approximated contour
+                const pts = [];
+                for (let j = 0; j < approx.rows; j++) {
+                  pts.push({
+                    x: approx.data32S[j * 2],
+                    y: approx.data32S[j * 2 + 1],
+                  });
+                }
+                bestPolyPoints = pts;
+                if (this.debugMode()) {
+                  console.log(`[DEBUG] New best contour: ${i}`);
+                  console.log(`[DEBUG] Contour corners:`, bestPolyPoints);
+                }
+              }
             }
           }
         }
         cnt.delete();
       }
 
-      // 7. Draw Result
+      // 7. Draw Detection Results
+      if (!this.debugMode()) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+      }
+
       if (bestPolyPoints) {
-        this.status.set(`Card Detected! Area: ${Math.floor(maxArea)}`);
+        // Increment stability counter
+        this.detectionStabilityCount++;
 
-        // Clear debug drawings if any
-        if (!this.debugMode()) {
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-        }
+        // Only consider it "stable" after STABILITY_THRESHOLD consecutive detections
+        if (this.detectionStabilityCount >= this.STABILITY_THRESHOLD) {
+          this.status.set(`Card Detected!`);
 
-        ctx.strokeStyle = '#00FF00';
-        ctx.lineWidth = 4;
-        ctx.beginPath();
+          if (this.debugMode()) {
+            console.log(`[DEBUG] ✓ STABLE CARD DETECTED with score: ${Math.floor(maxScore)}`);
+          }
 
-        ctx.moveTo(bestPolyPoints[0].x, bestPolyPoints[0].y);
-        ctx.lineTo(bestPolyPoints[1].x, bestPolyPoints[1].y);
-        ctx.lineTo(bestPolyPoints[2].x, bestPolyPoints[2].y);
-        ctx.lineTo(bestPolyPoints[3].x, bestPolyPoints[3].y);
-        ctx.closePath();
-        ctx.stroke();
+          // Draw green detection box
+          ctx.strokeStyle = '#00FF00';
+          ctx.lineWidth = 4;
+          ctx.beginPath();
+          ctx.moveTo(bestPolyPoints[0].x, bestPolyPoints[0].y);
+          ctx.lineTo(bestPolyPoints[1].x, bestPolyPoints[1].y);
+          ctx.lineTo(bestPolyPoints[2].x, bestPolyPoints[2].y);
+          ctx.lineTo(bestPolyPoints[3].x, bestPolyPoints[3].y);
+          ctx.closePath();
+          ctx.stroke();
 
-        // Trigger OCR
-        const now = Date.now();
-        if (now - this.lastOcrTime > this.OCR_INTERVAL && !this.isProcessingOcr) {
-          this.lastOcrTime = now;
-          this.isProcessingOcr = true;
-          this.performOcr(pCanvas, bestPolyPoints).finally(() => {
-            this.isProcessingOcr = false;
-          });
+          // Trigger OCR at intervals
+          const now = Date.now();
+          if (now - this.lastOcrTime > this.OCR_INTERVAL && !this.isProcessingOcr) {
+            this.lastOcrTime = now;
+            this.isProcessingOcr = true;
+            this.performOcr(pCanvas, bestPolyPoints).finally(() => {
+              this.isProcessingOcr = false;
+            });
+          }
+        } else {
+          this.status.set(
+            `Detecting... (${this.detectionStabilityCount}/${this.STABILITY_THRESHOLD})`
+          );
+
+          // Draw yellow detection box while stabilizing
+          ctx.strokeStyle = '#FFFF00';
+          ctx.lineWidth = 4;
+          ctx.beginPath();
+          ctx.moveTo(bestPolyPoints[0].x, bestPolyPoints[0].y);
+          ctx.lineTo(bestPolyPoints[1].x, bestPolyPoints[1].y);
+          ctx.lineTo(bestPolyPoints[2].x, bestPolyPoints[2].y);
+          ctx.lineTo(bestPolyPoints[3].x, bestPolyPoints[3].y);
+          ctx.closePath();
+          ctx.stroke();
         }
       } else {
-        if (!this.debugMode()) ctx.clearRect(0, 0, canvas.width, canvas.height);
+        // Reset stability counter if no detection
+        this.detectionStabilityCount = 0;
         this.status.set('Scanning...');
+        if (this.debugMode()) {
+          console.log(`[DEBUG] ✗ NO CARD DETECTED`);
+        }
       }
     } catch (err) {
       console.error('OpenCV Error', err);
     } finally {
       if (src) src.delete();
       if (gray) gray.delete();
-      if (blur) blur.delete();
-      if (edges) edges.delete();
+      if (binary) binary.delete();
       if (contours) contours.delete();
       if (hierarchy) hierarchy.delete();
       if (approx) approx.delete();
