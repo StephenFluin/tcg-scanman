@@ -54,6 +54,23 @@ export interface CardInfo {
       } @else {
       <p>Point camera at a Pokemon card...</p>
       <p class="hint">Ensure good lighting and hold the card steady.</p>
+      } @if (ocrImages().top || ocrImages().bottom) {
+      <div class="ocr-preview">
+        <h3>OCR Debug</h3>
+        <div class="ocr-images">
+          @if (ocrImages().top) {
+          <div class="ocr-image-container">
+            <span>Top</span>
+            <img [src]="ocrImages().top" alt="Top OCR Crop" />
+          </div>
+          } @if (ocrImages().bottom) {
+          <div class="ocr-image-container">
+            <span>Bottom</span>
+            <img [src]="ocrImages().bottom" alt="Bottom OCR Crop" />
+          </div>
+          }
+        </div>
+      </div>
       }
 
       <div class="logs-container">
@@ -104,6 +121,42 @@ export interface CardInfo {
         border-radius: 4px;
         box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
       }
+      .ocr-preview {
+        margin-top: 1rem;
+        border-top: 1px solid #ddd;
+        padding-top: 0.5rem;
+      }
+      .ocr-preview h3 {
+        font-size: 0.9rem;
+        margin: 0 0 0.5rem 0;
+        color: #666;
+      }
+      .ocr-images {
+        display: flex;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+      }
+      .ocr-image-container {
+        flex: 1;
+        min-width: 100px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        background: #fff;
+        padding: 0.25rem;
+        border: 1px solid #eee;
+        border-radius: 4px;
+      }
+      .ocr-image-container span {
+        font-size: 0.7rem;
+        color: #888;
+        margin-bottom: 0.25rem;
+      }
+      .ocr-image-container img {
+        max-width: 100%;
+        height: auto;
+        border: 1px solid #ccc;
+      }
       .logs-container {
         margin-top: auto;
         border-top: 1px solid #ddd;
@@ -141,4 +194,5 @@ export class CardDetailsComponent {
   info = input<CardInfo | null>(null);
   status = input<string>('');
   logs = input<string[]>([]);
+  ocrImages = input<{ top: string | null; bottom: string | null }>({ top: null, bottom: null });
 }

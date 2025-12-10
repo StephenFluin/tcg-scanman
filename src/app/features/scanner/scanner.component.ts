@@ -26,6 +26,7 @@ import { OcrService } from '../../core/services/ocr.service';
           [info]="cardInfo()"
           [status]="status()"
           [logs]="logs()"
+          [ocrImages]="ocrImages()"
         ></app-card-details>
       </div>
     </div>
@@ -67,6 +68,7 @@ export class ScannerComponent implements OnDestroy {
   status = signal<string>('Initializing...');
   logs = signal<string[]>([]);
   debugMode = signal(false);
+  ocrImages = signal<{ top: string | null; bottom: string | null }>({ top: null, bottom: null });
 
   private videoElement: HTMLVideoElement | null = null;
   private canvasElement: HTMLCanvasElement | null = null;
@@ -76,6 +78,7 @@ export class ScannerComponent implements OnDestroy {
   processCanvas = viewChild<ElementRef<HTMLCanvasElement>>('processCanvas');
 
   private isScanning = false;
+  private isProcessingOcr = false;
   private animationFrameId: number | null = null;
   private lastOcrTime = 0;
   private readonly OCR_INTERVAL = 1000; // Run OCR every 1s if card detected
@@ -92,46 +95,132 @@ export class ScannerComponent implements OnDestroy {
 
   async manualScan() {
     if (!this.videoElement || !this.opencvService.isReady()) return;
-
-    this.addLog('Manual scan triggered...');
-
-    const video = this.videoElement;
-    const width = video.videoWidth;
-    const height = video.videoHeight;
-
-    // Create a canvas to draw the frame
-    const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    ctx.drawImage(video, 0, 0, width, height);
-
-    // Calculate center crop based on card aspect ratio (63/88 ~= 0.716)
-    // Let's say we want to capture a good chunk of the height, maybe 80%?
-    const cardRatio = 63 / 88;
-
-    let cropHeight = height * 0.8;
-    let cropWidth = cropHeight * cardRatio;
-
-    // Ensure width doesn't exceed video width
-    if (cropWidth > width) {
-      cropWidth = width * 0.8;
-      cropHeight = cropWidth / cardRatio;
+    if (this.isProcessingOcr) {
+      this.addLog('Scan in progress. Please wait...');
+      return;
     }
 
-    const x = (width - cropWidth) / 2;
-    const y = (height - cropHeight) / 2;
+    this.addLog('Manual scan triggered...');
+    this.isProcessingOcr = true;
 
-    // Crop
-    const cropCanvas = document.createElement('canvas');
-    cropCanvas.width = cropWidth;
-    cropCanvas.height = cropHeight;
-    const cropCtx = cropCanvas.getContext('2d');
-    cropCtx?.drawImage(canvas, x, y, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
+    // Define logic variables for cleanup
+    let src: any, gray: any, binary: any, contours: any, hierarchy: any, kernel: any;
 
-    this.processCardImage(cropCanvas);
+    try {
+      const video = this.videoElement;
+      const width = video.videoWidth;
+      const height = video.videoHeight;
+      const cv = this.opencvService.cv;
+
+      // Create a canvas to draw the frame
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      ctx.drawImage(video, 0, 0, width, height);
+
+      // 1. Try to detect the card using the same algorithm as processFrame
+      src = cv.imread(canvas);
+      gray = new cv.Mat();
+      binary = new cv.Mat();
+
+      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY, 0);
+      cv.GaussianBlur(gray, gray, new cv.Size(5, 5), 0);
+
+      cv.adaptiveThreshold(
+        gray,
+        binary,
+        255,
+        cv.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv.THRESH_BINARY_INV,
+        11,
+        2
+      );
+
+      kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(9, 9));
+      cv.morphologyEx(binary, binary, cv.MORPH_CLOSE, kernel);
+
+      contours = new cv.MatVector();
+      hierarchy = new cv.Mat();
+      cv.findContours(binary, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+      let maxScore = -1;
+      let bestRectPoints = null;
+
+      const minArea = 20000;
+      const cardAspectRatio = 63 / 88;
+      const errorMargin = 0.2;
+
+      for (let i = 0; i < contours.size(); ++i) {
+        let cnt = contours.get(i);
+        let area = cv.contourArea(cnt);
+
+        if (area < minArea || area > width * height * 0.9) {
+          cnt.delete();
+          continue;
+        }
+
+        let rotatedRect = cv.minAreaRect(cnt);
+        let rw = rotatedRect.size.width;
+        let rh = rotatedRect.size.height;
+        let aspectRatio = Math.min(rw, rh) / Math.max(rw, rh);
+
+        if (Math.abs(aspectRatio - cardAspectRatio) < errorMargin) {
+          let rectArea = rw * rh;
+          let solidity = area / rectArea;
+
+          if (solidity > 0.85) {
+            let score = area * solidity;
+            if (score > maxScore) {
+              maxScore = score;
+              bestRectPoints = cv.RotatedRect.points(rotatedRect);
+            }
+          }
+        }
+        cnt.delete();
+      }
+
+      if (bestRectPoints) {
+        this.addLog(`Manual Scan: Card detected (Score: ${Math.floor(maxScore)})`);
+        await this.performOcr(canvas, bestRectPoints);
+      } else {
+        this.addLog('Manual Scan: No card detected. Using center crop fallback.');
+
+        // Fallback: Center Crop
+        const cardRatio = 63 / 88;
+        let cropHeight = height * 0.8;
+        let cropWidth = cropHeight * cardRatio;
+
+        if (cropWidth > width) {
+          cropWidth = width * 0.8;
+          cropHeight = cropWidth / cardRatio;
+        }
+
+        const x = (width - cropWidth) / 2;
+        const y = (height - cropHeight) / 2;
+
+        const cropCanvas = document.createElement('canvas');
+        cropCanvas.width = cropWidth;
+        cropCanvas.height = cropHeight;
+        const cropCtx = cropCanvas.getContext('2d');
+        cropCtx?.drawImage(canvas, x, y, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
+
+        await this.processCardImage(cropCanvas);
+      }
+    } catch (err) {
+      console.error('Manual scan error', err);
+      this.addLog(`Manual scan error: ${err}`);
+    } finally {
+      this.isProcessingOcr = false;
+      if (src) src.delete();
+      if (gray) gray.delete();
+      if (binary) binary.delete();
+      if (contours) contours.delete();
+      if (hierarchy) hierarchy.delete();
+      if (kernel) kernel.delete();
+    }
   }
 
   constructor() {
@@ -199,30 +288,17 @@ export class ScannerComponent implements OnDestroy {
       return;
     }
 
-    // Match canvas size to video
+    // 1. Setup Canvas
     if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
     }
-
-    // Clear previous drawing
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // OpenCV Processing
-    let src: any;
-    let dst: any;
-    let gray: any;
-    let blur: any;
-    let edges: any;
-    let contours: any;
-    let hierarchy: any;
+    let src: any, gray: any, blur: any, edges: any, contours: any, hierarchy: any, approx: any;
 
     try {
-      // Create Mats
-      // We can optimize by reusing Mats, but for now let's be safe and create/delete
-      // Or use a hidden canvas to draw video frame first if cv.imread(video) doesn't work directly in all browsers
-      // cv.imread usually takes an image or canvas.
-
+      // 2. Draw Video to Processing Canvas (Hidden)
       const pCanvas = this.processCanvas()!.nativeElement;
       if (pCanvas.width !== video.videoWidth || pCanvas.height !== video.videoHeight) {
         pCanvas.width = video.videoWidth;
@@ -231,186 +307,167 @@ export class ScannerComponent implements OnDestroy {
       const pCtx = pCanvas.getContext('2d')!;
       pCtx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight);
 
+      // 3. Initialize Mats
       src = cv.imread(pCanvas);
-      dst = new cv.Mat();
       gray = new cv.Mat();
       blur = new cv.Mat();
       edges = new cv.Mat();
+      approx = new cv.Mat();
 
-      // Preprocessing
+      // 4. Pre-processing
       cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY, 0);
-      cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT);
-      cv.Canny(blur, edges, 75, 200);
 
-      if (this.debugMode()) {
-        // Draw edges to canvas to visualize what computer sees
-        // We need to convert single channel edges to RGBA for canvas
-        const debugMat = new cv.Mat();
-        cv.cvtColor(edges, debugMat, cv.COLOR_GRAY2RGBA);
-        const imgData = new ImageData(
-          new Uint8ClampedArray(debugMat.data),
-          debugMat.cols,
-          debugMat.rows
-        );
-        ctx.putImageData(imgData, 0, 0);
-        debugMat.delete();
-      }
+      // HEAVY BLUR: This is critical. We use a large 7x7 kernel to "erase" the text
+      // and artwork inside the card. We only want the high-contrast card border to remain.
+      cv.GaussianBlur(gray, blur, new cv.Size(7, 7), 0, 0, cv.BORDER_DEFAULT);
 
-      // Find Contours
+      // CANNY EDGE DETECTION
+      // We switch back to Canny because it gives us thin lines to count corners.
+      // 30/100 are relatively low thresholds to ensure we catch the card border even in lower light.
+      cv.Canny(blur, edges, 30, 100);
+
+      // DILATION
+      // Thickens the edge lines to close small gaps (like where a finger might break the line).
+      // This ensures the card outline is a single continuous loop.
+      const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
+      cv.dilate(edges, edges, kernel);
+      kernel.delete();
+
+      // 5. Find Contours
       contours = new cv.MatVector();
       hierarchy = new cv.Mat();
       cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-      let maxScore = -1;
-      let bestContour = null;
-      let bestScoreDetails = '';
+      let maxArea = 0;
+      let bestPolyPoints: any[] | null = null;
 
-      const centerX = video.videoWidth / 2;
-      const centerY = video.videoHeight / 2;
+      // Ignore small noise (less than 5% of screen area)
+      const minArea = video.videoWidth * video.videoHeight * 0.05;
 
       for (let i = 0; i < contours.size(); ++i) {
         let cnt = contours.get(i);
         let area = cv.contourArea(cnt);
 
-        // Filter small noise
-        if (area < 5000) {
+        if (area < minArea) {
           cnt.delete();
           continue;
         }
 
+        // 6. Polygon Approximation
+        // Simplify the contour. Epsilon is the "slack" allowed.
+        // 0.02 (2%) of perimeter is standard for rectangle detection.
         let peri = cv.arcLength(cnt, true);
-        let approx = new cv.Mat();
-        // Looser approximation (0.04 instead of 0.02) to handle slightly curved or skewed cards
-        cv.approxPolyDP(cnt, approx, 0.04 * peri, true);
+        cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
 
-        if (approx.rows === 4) {
-          // Calculate score based on area and distance from center
-          // We want large area and close to center
+        // STRICT FILTER 1: Must have exactly 4 corners
+        if (approx.rows === 4 && cv.isContourConvex(approx)) {
+          // STRICT FILTER 2: Cosine Check (Squareness)
+          // Ensure angles are close to 90 degrees.
+          // This rejects trapezoidal shadows or weird random shapes.
+          let maxCosine = 0;
+          const pts = approx.data32S; // [x1, y1, x2, y2, x3, y3, x4, y4]
 
-          const moments = cv.moments(cnt, false);
-          const cx = moments.m10 / moments.m00;
-          const cy = moments.m01 / moments.m00;
+          for (let j = 0; j < 4; j++) {
+            const p0 = { x: pts[j * 2], y: pts[j * 2 + 1] };
+            const p1 = { x: pts[((j + 1) % 4) * 2], y: pts[((j + 1) % 4) * 2 + 1] };
+            const p2 = { x: pts[((j + 2) % 4) * 2], y: pts[((j + 2) % 4) * 2 + 1] };
 
-          const dist = Math.sqrt(Math.pow(cx - centerX, 2) + Math.pow(cy - centerY, 2));
+            const dx1 = p0.x - p1.x;
+            const dy1 = p0.y - p1.y;
+            const dx2 = p2.x - p1.x;
+            const dy2 = p2.y - p1.y;
 
-          // Heuristic: Area / (Distance + 1)
-          // Or just prioritize area but penalize distance slightly
-          // Let's say we want it within the center 50% of screen
+            // Dot Product to find angle
+            const dot = dx1 * dx2 + dy1 * dy2;
+            const mag1 = Math.sqrt(dx1 * dx1 + dy1 * dy1);
+            const mag2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
 
-          // Simple score: Area - Distance * Factor
-          // Factor depends on units. Area is in pixels^2, Distance in pixels.
-          // Let's normalize.
-
-          // New Heuristic:
-          // 1. Area Score: Ratio of contour area to screen area (0 to 1)
-          // 2. Center Score: 1 - (Distance / MaxDistance) (0 to 1)
-          // 3. Shape Score: Aspect ratio check (Pokemon cards are ~0.71)
-
-          const screenArea = video.videoWidth * video.videoHeight;
-          const areaScore = area / screenArea; // e.g. 0.5 if takes up half screen
-
-          const maxDist = Math.sqrt(Math.pow(centerX, 2) + Math.pow(centerY, 2));
-          const centerScore = 1 - dist / maxDist; // 1 at center, 0 at corner
-
-          // Aspect Ratio Check
-          // Use bounding rect for rough aspect ratio
-          const rect = cv.boundingRect(cnt);
-          const aspectRatio = rect.width / rect.height;
-          const targetRatio = 0.71; // 63/88
-          const ratioDiff = Math.abs(aspectRatio - targetRatio);
-          const shapeScore = 1 - Math.min(ratioDiff, 1); // 1 is perfect match
-
-          // Combined Score
-          // We want big cards (area), centered (center), correct shape (shape)
-          // Weight area heavily so we don't ignore big cards just because they are slightly off-center
-          const score = areaScore * 0.6 + centerScore * 0.2 + shapeScore * 0.2;
-
-          // Log details for debugging
-          if (this.debugMode() && i % 5 === 0) {
-            // Log occasionally to avoid spam
-            console.log(
-              `Contour ${i}: Area=${areaScore.toFixed(2)}, Center=${centerScore.toFixed(
-                2
-              )}, Shape=${shapeScore.toFixed(2)}, Score=${score.toFixed(2)}`
-            );
+            const cosine = Math.abs(dot / (mag1 * mag2));
+            maxCosine = Math.max(maxCosine, cosine);
           }
 
-          if (score > maxScore) {
-            maxScore = score;
-            bestScoreDetails = `A:${areaScore.toFixed(2)} C:${centerScore.toFixed(2)} S:${shapeScore.toFixed(2)}`;
-            if (bestContour) bestContour.delete();
-            bestContour = approx; // Keep the approx
-          } else {
-            approx.delete();
+          // Cosine of 90° is 0. We allow deviation up to ~0.3 (approx 72°-108°)
+          if (maxCosine < 0.3) {
+            // STRICT FILTER 3: Aspect Ratio
+            const rect = cv.boundingRect(approx);
+            const ratio = rect.width / rect.height;
+
+            // Pokemon cards: 0.71 (Portrait) or 1.4 (Landscape)
+            const isPortrait = ratio > 0.6 && ratio < 0.85;
+            const isLandscape = ratio > 1.2 && ratio < 1.6;
+
+            if ((isPortrait || isLandscape) && area > maxArea) {
+              maxArea = area;
+
+              // Extract points for drawing
+              bestPolyPoints = [
+                { x: pts[0], y: pts[1] },
+                { x: pts[2], y: pts[3] },
+                { x: pts[4], y: pts[5] },
+                { x: pts[6], y: pts[7] },
+              ];
+            }
           }
-        } else {
-          approx.delete();
         }
         cnt.delete();
       }
 
-      if (bestContour) {
-        this.status.set(`Detected! ${maxScore.toFixed(2)} [${bestScoreDetails}]`);
-        // Draw contour
-        // We need to convert bestContour (Mat) to points for drawing on canvas overlay
-        // Or we can draw on 'dst' and show that, but we want overlay on video.
+      // 7. Draw Result
+      if (bestPolyPoints) {
+        this.status.set(`Card Detected! Area: ${Math.floor(maxArea)}`);
+
+        // Clear debug drawings if any
+        if (!this.debugMode()) {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
 
         ctx.strokeStyle = '#00FF00';
         ctx.lineWidth = 4;
         ctx.beginPath();
 
-        const data = bestContour.data32S; // Int32 array of points [x1, y1, x2, y2...]
-        if (data.length >= 8) {
-          ctx.moveTo(data[0], data[1]);
-          ctx.lineTo(data[2], data[3]);
-          ctx.lineTo(data[4], data[5]);
-          ctx.lineTo(data[6], data[7]);
-          ctx.closePath();
-          ctx.stroke();
+        ctx.moveTo(bestPolyPoints[0].x, bestPolyPoints[0].y);
+        ctx.lineTo(bestPolyPoints[1].x, bestPolyPoints[1].y);
+        ctx.lineTo(bestPolyPoints[2].x, bestPolyPoints[2].y);
+        ctx.lineTo(bestPolyPoints[3].x, bestPolyPoints[3].y);
+        ctx.closePath();
+        ctx.stroke();
 
-          // Trigger OCR if enough time passed
-          const now = Date.now();
-          if (now - this.lastOcrTime > this.OCR_INTERVAL && !this.debugMode()) {
-            this.lastOcrTime = now;
-            this.status.set('Processing OCR...');
-            this.addLog('Card stable. Starting OCR processing...');
-            this.performOcr(pCanvas, bestContour);
-          }
+        // Trigger OCR
+        const now = Date.now();
+        if (now - this.lastOcrTime > this.OCR_INTERVAL && !this.isProcessingOcr) {
+          this.lastOcrTime = now;
+          this.isProcessingOcr = true;
+          this.performOcr(pCanvas, bestPolyPoints).finally(() => {
+            this.isProcessingOcr = false;
+          });
         }
-        bestContour.delete();
       } else {
-        this.status.set(`Scanning... Best: ${maxScore.toFixed(2)} [${bestScoreDetails || 'None'}]`);
+        if (!this.debugMode()) ctx.clearRect(0, 0, canvas.width, canvas.height);
+        this.status.set('Scanning...');
       }
     } catch (err) {
       console.error('OpenCV Error', err);
     } finally {
       if (src) src.delete();
-      if (dst) dst.delete();
       if (gray) gray.delete();
       if (blur) blur.delete();
       if (edges) edges.delete();
       if (contours) contours.delete();
       if (hierarchy) hierarchy.delete();
+      if (approx) approx.delete();
     }
 
     this.animationFrameId = requestAnimationFrame(() => this.processFrame());
   }
 
-  async performOcr(imageCanvas: HTMLCanvasElement, contour: any) {
+  async performOcr(imageCanvas: HTMLCanvasElement, pointsInput: any) {
     const cv = this.opencvService.cv;
 
     // 1. Get the 4 points from the contour
-    // contour is a Mat of type CV_32SC2 (integer points)
-    // We need to convert to float for getPerspectiveTransform
-
-    const pointsData = contour.data32S;
-    // Create array of points
-    const points = [
-      { x: pointsData[0], y: pointsData[1] },
-      { x: pointsData[2], y: pointsData[3] },
-      { x: pointsData[4], y: pointsData[5] },
-      { x: pointsData[6], y: pointsData[7] },
-    ];
+    // Ensure points is an array (cv.RotatedRect.points might return an object with 0,1,2,3 keys)
+    const points = Array.isArray(pointsInput)
+      ? pointsInput
+      : [pointsInput[0], pointsInput[1], pointsInput[2], pointsInput[3]];
 
     // Sort points to TL, TR, BR, BL
     // Simple sorting based on sum and diff of x,y
@@ -479,7 +536,7 @@ export class ScannerComponent implements OnDestroy {
     srcTri.delete();
     dstTri.delete();
 
-    this.processCardImage(outCanvas);
+    await this.processCardImage(outCanvas);
   }
 
   async processCardImage(cardCanvas: HTMLCanvasElement) {
@@ -509,9 +566,14 @@ export class ScannerComponent implements OnDestroy {
       ?.drawImage(cardCanvas, 0, height * 0.9, width, height * 0.1, 0, 0, width, height * 0.1);
 
     // Save debug images to local storage or log them (as data URLs)
+    const topDataUrl = topCanvas.toDataURL('image/jpeg');
+    const bottomDataUrl = bottomCanvas.toDataURL('image/jpeg');
+
+    this.ocrImages.set({ top: topDataUrl, bottom: bottomDataUrl });
+
     if (this.debugMode()) {
-      console.log('Top Image:', topCanvas.toDataURL('image/jpeg'));
-      console.log('Bottom Image:', bottomCanvas.toDataURL('image/jpeg'));
+      console.log('Top Image:', topDataUrl);
+      console.log('Bottom Image:', bottomDataUrl);
       this.addLog('Debug: Logged Top/Bottom images to console');
     }
 
