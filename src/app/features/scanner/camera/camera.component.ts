@@ -23,9 +23,6 @@ import { CommonModule } from '@angular/common';
       <div class="video-wrapper">
         <video #video autoplay playsinline muted (loadedmetadata)="onVideoLoaded()"></video>
         <canvas #canvas></canvas>
-        <div class="overlay-guide">
-          <div class="card-outline"></div>
-        </div>
       </div>
 
       <div class="controls">

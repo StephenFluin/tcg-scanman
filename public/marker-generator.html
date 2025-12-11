@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ArUco Marker Generator</title>
+    <script src="https://cdn.jsdelivr.net/npm/js-aruco2@2.0.0/dist/aruco.min.js"></script>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 20px;
+        background: #f5f5f5;
+      }
+      h1 {
+        color: #333;
+      }
+      .instructions {
+        background: white;
+        padding: 20px;
+        border-radius: 8px;
+        margin-bottom: 20px;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+      }
+      .marker-grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 20px;
+        margin-top: 20px;
+      }
+      .marker-container {
+        background: white;
+        padding: 20px;
+        border-radius: 8px;
+        text-align: center;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+      }
+      .marker-container h3 {
+        margin-top: 0;
+        color: #333;
+      }
+      .marker-svg {
+        border: 2px solid #ddd;
+        margin: 10px 0;
+      }
+      button {
+        background: #007bff;
+        color: white;
+        border: none;
+        padding: 12px 24px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 16px;
+        margin-top: 20px;
+      }
+      button:hover {
+        background: #0056b3;
+      }
+      .print-layout {
+        display: none;
+      }
+      @media print {
+        body {
+          background: white;
+        }
+        .instructions,
+        button {
+          display: none;
+        }
+        .marker-grid {
+          display: block;
+          page-break-before: always;
+        }
+        .marker-container {
+          position: absolute;
+          box-shadow: none;
+          border: 1px solid black;
+        }
+        .marker-container:nth-child(1) {
+          top: 50px;
+          left: 50px;
+        }
+        .marker-container:nth-child(2) {
+          top: 50px;
+          right: 50px;
+        }
+        .marker-container:nth-child(3) {
+          bottom: 50px;
+          left: 50px;
+        }
+        .marker-container:nth-child(4) {
+          bottom: 50px;
+          right: 50px;
+        }
+        .card-placeholder {
+          display: block;
+          position: absolute;
+          top: 50%;
+          left: 50%;
+          transform: translate(-50%, -50%);
+          width: 250px;
+          height: 350px;
+          border: 2px dashed #999;
+          background: rgba(200, 200, 200, 0.1);
+        }
+        .card-placeholder::before {
+          content: 'Place Pokemon Card Here';
+          position: absolute;
+          top: 50%;
+          left: 50%;
+          transform: translate(-50%, -50%);
+          font-size: 18px;
+          color: #666;
+          text-align: center;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <h1>ArUco Marker Generator for TCG Scanner</h1>
+
+    <div class="instructions">
+      <h2>Instructions:</h2>
+      <ol>
+        <li>Click the "Print Markers" button below</li>
+        <li>Print the page on white paper (A4 or Letter size)</li>
+        <li>Place your Pokemon card in the center dashed rectangle</li>
+        <li>Position the printed page so all 4 markers are visible to your camera</li>
+        <li>The scanner will automatically detect the card using these markers</li>
+      </ol>
+      <p>
+        <strong>Note:</strong> These markers use the ARUCO dictionary which is compatible with
+        js-aruco2.
+      </p>
+    </div>
+
+    <div class="marker-grid" id="markerGrid"></div>
+
+    <div class="card-placeholder"></div>
+
+    <button onclick="window.print()">Print Markers</button>
+
+    <script>
+      // Generate 4 markers at the corners
+      const markerIds = [0, 1, 2, 3];
+      const markerSize = 150; // Size in pixels
+      const dictionary = new AR.Dictionary('ARUCO');
+
+      const markerGrid = document.getElementById('markerGrid');
+
+      markerIds.forEach((id, index) => {
+        const container = document.createElement('div');
+        container.className = 'marker-container';
+
+        const title = document.createElement('h3');
+        const positions = ['Top-Left', 'Top-Right', 'Bottom-Left', 'Bottom-Right'];
+        title.textContent = `Marker ${id} (${positions[index]})`;
+        container.appendChild(title);
+
+        const svgString = dictionary.generateSVG(id);
+        const svgContainer = document.createElement('div');
+        svgContainer.className = 'marker-svg';
+        svgContainer.innerHTML = svgString;
+
+        // Scale the SVG
+        const svg = svgContainer.querySelector('svg');
+        if (svg) {
+          svg.setAttribute('width', markerSize);
+          svg.setAttribute('height', markerSize);
+        }
+
+        container.appendChild(svgContainer);
+
+        const idLabel = document.createElement('p');
+        idLabel.textContent = `ID: ${id}`;
+        idLabel.style.fontWeight = 'bold';
+        container.appendChild(idLabel);
+
+        markerGrid.appendChild(container);
+      });
+    </script>
+  </body>
+</html>

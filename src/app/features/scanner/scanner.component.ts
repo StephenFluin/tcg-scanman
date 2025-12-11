@@ -4,6 +4,7 @@ import { CameraComponent } from './camera/camera.component';
 import { CardDetailsComponent, CardInfo } from './card-details/card-details.component';
 import { OpencvService } from '../../core/services/opencv.service';
 import { OcrService } from '../../core/services/ocr.service';
+import { AR } from 'js-aruco2';
 
 @Component({
   selector: 'app-scanner',
@@ -21,6 +22,7 @@ import { OcrService } from '../../core/services/ocr.service';
         <div class="actions">
           <button (click)="manualScan()">Manual Scan</button>
           <button (click)="toggleDebug()">{{ debugMode() ? 'Hide Debug' : 'Show Debug' }}</button>
+          <button (click)="debugFullOcr()">Debug Full OCR</button>
         </div>
         <app-card-details
           [info]="cardInfo()"
@@ -87,6 +89,9 @@ export class ScannerComponent implements OnDestroy {
   private detectionStabilityCount = 0;
   private readonly STABILITY_THRESHOLD = 3; // Require 3 consecutive detections
 
+  // Store detected card points for manual scan
+  private lastDetectedPoints: any[] | null = null;
+
   addLog(message: string) {
     const timestamp = new Date().toLocaleTimeString();
     this.logs.update((logs) => [`[${timestamp}] ${message}`, ...logs].slice(0, 50));
@@ -97,6 +102,51 @@ export class ScannerComponent implements OnDestroy {
     this.addLog(`Debug mode ${this.debugMode() ? 'enabled' : 'disabled'}`);
   }
 
+  async debugFullOcr() {
+    if (!this.videoElement || !this.opencvService.isReady()) return;
+    if (this.isProcessingOcr) {
+      this.addLog('Scan in progress. Please wait...');
+      return;
+    }
+
+    this.addLog('Debug Full OCR: Capturing full frame...');
+    this.isProcessingOcr = true;
+
+    try {
+      const video = this.videoElement;
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      this.addLog('Debug Full OCR: Running OCR on entire frame...');
+      const result = await this.ocrService.recognize(canvas);
+
+      const fullText = result?.text || '';
+      const confidence = Math.round(result?.confidence || 0);
+
+      this.addLog(`Debug Full OCR Result (${confidence}% confidence):`);
+      const lines = fullText.split('\n').filter((l: string) => l.trim().length > 0);
+      lines.forEach((line: string, i: number) => {
+        this.addLog(`  Line ${i + 1}: "${line}"`);
+      });
+
+      // Save the full frame image
+      this.ocrImages.update((imgs) => ({
+        ...imgs,
+        top: canvas.toDataURL('image/jpeg'),
+      }));
+    } catch (err: any) {
+      console.error('Debug Full OCR error', err);
+      this.addLog(`Debug Full OCR error: ${err?.message || err}`);
+    } finally {
+      this.isProcessingOcr = false;
+    }
+  }
+
   async manualScan() {
     if (!this.videoElement || !this.opencvService.isReady()) return;
     if (this.isProcessingOcr) {
@@ -105,125 +155,29 @@ export class ScannerComponent implements OnDestroy {
     }
 
     this.addLog('Manual scan triggered...');
-    this.isProcessingOcr = true;
+    const hasPoints = !!this.lastDetectedPoints;
+    const hasCanvas = !!this.processCanvas();
+    const pointsCount = this.lastDetectedPoints?.length || 0;
+    this.addLog(`Debug: hasPoints=${hasPoints}, hasCanvas=${hasCanvas}, count=${pointsCount}`);
 
-    // Define logic variables for cleanup
-    let src: any, gray: any, binary: any, contours: any, hierarchy: any, kernel: any;
-
-    try {
-      const video = this.videoElement;
-      const width = video.videoWidth;
-      const height = video.videoHeight;
-      const cv = this.opencvService.cv;
-
-      // Create a canvas to draw the frame
-      const canvas = document.createElement('canvas');
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
-
-      ctx.drawImage(video, 0, 0, width, height);
-
-      // 1. Try to detect the card using the same algorithm as processFrame
-      src = cv.imread(canvas);
-      gray = new cv.Mat();
-      binary = new cv.Mat();
-
-      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY, 0);
-      cv.GaussianBlur(gray, gray, new cv.Size(5, 5), 0);
-
-      cv.adaptiveThreshold(
-        gray,
-        binary,
-        255,
-        cv.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv.THRESH_BINARY_INV,
-        11,
-        2
+    // Check if we have recently detected card points from auto-scan
+    if (this.lastDetectedPoints && this.processCanvas()) {
+      this.isProcessingOcr = true;
+      try {
+        const canvas = this.processCanvas()!.nativeElement;
+        this.addLog('Manual Scan: Using detected card position from auto-scan');
+        await this.performOcr(canvas, this.lastDetectedPoints);
+      } catch (err: any) {
+        console.error('Manual scan error', err);
+        const errorMsg = err?.message || err?.toString() || 'Unknown error';
+        this.addLog(`Manual scan error: ${errorMsg}`);
+      } finally {
+        this.isProcessingOcr = false;
+      }
+    } else {
+      this.addLog(
+        'Manual Scan: No card detected. Please position the card with all 4 markers visible.'
       );
-
-      kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(9, 9));
-      cv.morphologyEx(binary, binary, cv.MORPH_CLOSE, kernel);
-
-      contours = new cv.MatVector();
-      hierarchy = new cv.Mat();
-      cv.findContours(binary, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
-      let maxScore = -1;
-      let bestRectPoints = null;
-
-      const minArea = 20000;
-      const cardAspectRatio = 63 / 88;
-      const errorMargin = 0.2;
-
-      for (let i = 0; i < contours.size(); ++i) {
-        let cnt = contours.get(i);
-        let area = cv.contourArea(cnt);
-
-        if (area < minArea || area > width * height * 0.9) {
-          cnt.delete();
-          continue;
-        }
-
-        let rotatedRect = cv.minAreaRect(cnt);
-        let rw = rotatedRect.size.width;
-        let rh = rotatedRect.size.height;
-        let aspectRatio = Math.min(rw, rh) / Math.max(rw, rh);
-
-        if (Math.abs(aspectRatio - cardAspectRatio) < errorMargin) {
-          let rectArea = rw * rh;
-          let solidity = area / rectArea;
-
-          if (solidity > 0.85) {
-            let score = area * solidity;
-            if (score > maxScore) {
-              maxScore = score;
-              bestRectPoints = cv.RotatedRect.points(rotatedRect);
-            }
-          }
-        }
-        cnt.delete();
-      }
-
-      if (bestRectPoints) {
-        this.addLog(`Manual Scan: Card detected (Score: ${Math.floor(maxScore)})`);
-        await this.performOcr(canvas, bestRectPoints);
-      } else {
-        this.addLog('Manual Scan: No card detected. Using center crop fallback.');
-
-        // Fallback: Center Crop
-        const cardRatio = 63 / 88;
-        let cropHeight = height * 0.8;
-        let cropWidth = cropHeight * cardRatio;
-
-        if (cropWidth > width) {
-          cropWidth = width * 0.8;
-          cropHeight = cropWidth / cardRatio;
-        }
-
-        const x = (width - cropWidth) / 2;
-        const y = (height - cropHeight) / 2;
-
-        const cropCanvas = document.createElement('canvas');
-        cropCanvas.width = cropWidth;
-        cropCanvas.height = cropHeight;
-        const cropCtx = cropCanvas.getContext('2d');
-        cropCtx?.drawImage(canvas, x, y, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
-
-        await this.processCardImage(cropCanvas);
-      }
-    } catch (err) {
-      console.error('Manual scan error', err);
-      this.addLog(`Manual scan error: ${err}`);
-    } finally {
-      this.isProcessingOcr = false;
-      if (src) src.delete();
-      if (gray) gray.delete();
-      if (binary) binary.delete();
-      if (contours) contours.delete();
-      if (hierarchy) hierarchy.delete();
-      if (kernel) kernel.delete();
     }
   }
 
@@ -271,7 +225,7 @@ export class ScannerComponent implements OnDestroy {
     }
   }
 
-  processFrame() {
+  async processFrame() {
     if (
       !this.isScanning ||
       !this.videoElement ||
@@ -299,235 +253,401 @@ export class ScannerComponent implements OnDestroy {
     }
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    let src: any, gray: any, binary: any, contours: any, hierarchy: any, approx: any;
+    // 2. Draw Video to Processing Canvas (Hidden)
+    const pCanvas = this.processCanvas()!.nativeElement;
+    if (pCanvas.width !== video.videoWidth || pCanvas.height !== video.videoHeight) {
+      pCanvas.width = video.videoWidth;
+      pCanvas.height = video.videoHeight;
+    }
+    const pCtx = pCanvas.getContext('2d')!;
+    pCtx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight);
+
+    // 3. Call the appropriate detection algorithm
+    let bestPolyPoints: any[] | null = null;
+    let maxScore = 0;
 
     try {
-      // 2. Draw Video to Processing Canvas (Hidden)
-      const pCanvas = this.processCanvas()!.nativeElement;
-      if (pCanvas.width !== video.videoWidth || pCanvas.height !== video.videoHeight) {
-        pCanvas.width = video.videoWidth;
-        pCanvas.height = video.videoHeight;
-      }
-      const pCtx = pCanvas.getContext('2d')!;
-      pCtx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight);
+      const detectionResult = await this.detectCard(pCanvas, cv, video);
+      bestPolyPoints = detectionResult.points;
+      maxScore = detectionResult.score;
 
-      // 3. Initialize Mats
-      src = cv.imread(pCanvas);
-      gray = new cv.Mat();
-      binary = new cv.Mat();
-      approx = new cv.Mat();
-
-      // 4. Pre-processing - Convert to grayscale
-      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY, 0);
-
-      // Use Gaussian blur to reduce noise more aggressively
-      cv.GaussianBlur(gray, gray, new cv.Size(9, 9), 0);
-
-      // Use adaptive threshold instead of Canny to detect the card border better
-      // This works better for detecting solid rectangular objects like cards
-      cv.adaptiveThreshold(
-        gray,
-        binary,
-        255,
-        cv.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv.THRESH_BINARY_INV,
-        11,
-        2
-      );
-
-      // MORPHOLOGICAL CLOSING: Fill gaps and smooth the outline
-      // LARGER kernel = more aggressive smoothing of the card border
-      const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(15, 15));
-      cv.morphologyEx(binary, binary, cv.MORPH_CLOSE, kernel);
-      cv.dilate(binary, binary, kernel);
-      kernel.delete();
-
-      // Optional: Debug View - See what the computer calculates
-      if (this.debugMode()) {
-        cv.imshow(pCanvas, binary);
-        ctx.drawImage(pCanvas, 0, 0, canvas.width, canvas.height);
-      }
-
-      // 5. Find Contours
-      contours = new cv.MatVector();
-      hierarchy = new cv.Mat();
-      cv.findContours(binary, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
-      let maxScore = 0;
-      let bestPolyPoints: any[] | null = null;
-
-      // Ignore small noise (less than 8% of screen area) and too large (more than 90%)
-      // Increased minArea to avoid detecting small features within the card
-      const minArea = video.videoWidth * video.videoHeight * 0.08;
-      const maxArea = video.videoWidth * video.videoHeight * 0.9;
-
-      if (this.debugMode()) {
-        console.log(`[DEBUG] Total contours found: ${contours.size()}`);
-        console.log(`[DEBUG] Area range: ${Math.floor(minArea)} - ${Math.floor(maxArea)}`);
-      }
-
-      // Pokemon card aspect ratio: 63mm x 88mm = 0.716
-      const cardAspectRatio = 63 / 88;
-      const aspectRatioTolerance = 0.25; // Tighter tolerance for better card detection
-
-      for (let i = 0; i < contours.size(); ++i) {
-        let cnt = contours.get(i);
-        let area = cv.contourArea(cnt);
-
-        if (area < minArea || area > maxArea) {
-          cnt.delete();
-          continue;
-        }
-
-        if (this.debugMode()) {
-          console.log(`[DEBUG] Contour ${i}: area=${Math.floor(area)}`);
-        }
-
-        // 6. Polygon Approximation
-        // Epsilon balanced for 4 corners without oversimplification
-        let peri = cv.arcLength(cnt, true);
-        cv.approxPolyDP(cnt, approx, 0.04 * peri, true);
-
-        if (this.debugMode()) {
-          console.log(
-            `[DEBUG] Contour ${i}: approx has ${approx.rows} corners, isConvex=${cv.isContourConvex(
-              approx
-            )}`
-          );
-        }
-
-        // STRICT FILTER 1: Must have exactly 4 corners and be convex
-        if (approx.rows === 4 && cv.isContourConvex(approx)) {
-          if (this.debugMode()) {
-            console.log(`[DEBUG] Contour ${i}: ✓ PASSED 4 corners test`);
-          }
-
-          // STRICT FILTER 2: Check aspect ratio using minAreaRect
-          let rotatedRect = cv.minAreaRect(cnt);
-          let rw = rotatedRect.size.width;
-          let rh = rotatedRect.size.height;
-          let aspectRatio = Math.min(rw, rh) / Math.max(rw, rh);
-
-          if (this.debugMode()) {
-            console.log(
-              `[DEBUG] Contour ${i}: aspect ratio=${aspectRatio.toFixed(
-                3
-              )} (target=${cardAspectRatio.toFixed(3)})`
-            );
-          }
-
-          if (Math.abs(aspectRatio - cardAspectRatio) < aspectRatioTolerance) {
-            // STRICT FILTER 3: Check solidity (area / bounding box area)
-            let rectArea = rw * rh;
-            let solidity = area / rectArea;
-
-            if (this.debugMode()) {
-              console.log(`[DEBUG] Contour ${i}: solidity=${solidity.toFixed(3)}`);
-            }
-
-            if (solidity > 0.8) {
-              // Score based on area and solidity - prefer larger, more solid rectangles
-              let score = area * solidity;
-
-              if (this.debugMode()) {
-                console.log(`[DEBUG] Contour ${i}: ✓ PASSED all tests! Score=${Math.floor(score)}`);
-              }
-
-              if (score > maxScore) {
-                maxScore = score;
-                // Extract the 4 corner points from the approximated contour
-                const pts = [];
-                for (let j = 0; j < approx.rows; j++) {
-                  pts.push({
-                    x: approx.data32S[j * 2],
-                    y: approx.data32S[j * 2 + 1],
-                  });
-                }
-                bestPolyPoints = pts;
-                if (this.debugMode()) {
-                  console.log(`[DEBUG] New best contour: ${i}`);
-                  console.log(`[DEBUG] Contour corners:`, bestPolyPoints);
-                }
-              }
-            }
-          }
-        }
-        cnt.delete();
-      }
-
-      // 7. Draw Detection Results
-      if (!this.debugMode()) {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-      }
-
-      if (bestPolyPoints) {
-        // Increment stability counter
-        this.detectionStabilityCount++;
-
-        // Only consider it "stable" after STABILITY_THRESHOLD consecutive detections
-        if (this.detectionStabilityCount >= this.STABILITY_THRESHOLD) {
-          this.status.set(`Card Detected!`);
-
-          if (this.debugMode()) {
-            console.log(`[DEBUG] ✓ STABLE CARD DETECTED with score: ${Math.floor(maxScore)}`);
-          }
-
-          // Draw green detection box
-          ctx.strokeStyle = '#00FF00';
-          ctx.lineWidth = 4;
-          ctx.beginPath();
-          ctx.moveTo(bestPolyPoints[0].x, bestPolyPoints[0].y);
-          ctx.lineTo(bestPolyPoints[1].x, bestPolyPoints[1].y);
-          ctx.lineTo(bestPolyPoints[2].x, bestPolyPoints[2].y);
-          ctx.lineTo(bestPolyPoints[3].x, bestPolyPoints[3].y);
-          ctx.closePath();
-          ctx.stroke();
-
-          // Trigger OCR at intervals
-          const now = Date.now();
-          if (now - this.lastOcrTime > this.OCR_INTERVAL && !this.isProcessingOcr) {
-            this.lastOcrTime = now;
-            this.isProcessingOcr = true;
-            this.performOcr(pCanvas, bestPolyPoints).finally(() => {
-              this.isProcessingOcr = false;
-            });
-          }
-        } else {
-          this.status.set(
-            `Detecting... (${this.detectionStabilityCount}/${this.STABILITY_THRESHOLD})`
-          );
-
-          // Draw yellow detection box while stabilizing
-          ctx.strokeStyle = '#FFFF00';
-          ctx.lineWidth = 4;
-          ctx.beginPath();
-          ctx.moveTo(bestPolyPoints[0].x, bestPolyPoints[0].y);
-          ctx.lineTo(bestPolyPoints[1].x, bestPolyPoints[1].y);
-          ctx.lineTo(bestPolyPoints[2].x, bestPolyPoints[2].y);
-          ctx.lineTo(bestPolyPoints[3].x, bestPolyPoints[3].y);
-          ctx.closePath();
-          ctx.stroke();
-        }
-      } else {
-        // Reset stability counter if no detection
-        this.detectionStabilityCount = 0;
-        this.status.set('Scanning...');
-        if (this.debugMode()) {
-          console.log(`[DEBUG] ✗ NO CARD DETECTED`);
-        }
+      // Debug logging
+      if (bestPolyPoints && Math.random() < 0.1) {
+        // Log 10% of the time to avoid spam
+        console.log('[FRAME] bestPolyPoints:', bestPolyPoints ? 'EXISTS' : 'NULL');
+        console.log('[FRAME] About to store lastDetectedPoints');
       }
     } catch (err) {
-      console.error('OpenCV Error', err);
-    } finally {
-      if (src) src.delete();
-      if (gray) gray.delete();
-      if (binary) binary.delete();
-      if (contours) contours.delete();
-      if (hierarchy) hierarchy.delete();
-      if (approx) approx.delete();
+      console.error('Detection Error', err);
+    }
+
+    // 4. Draw Detection Results
+    if (!this.debugMode()) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+
+    if (bestPolyPoints) {
+      // Store the latest detected points for manual scan (store immediately, don't wait for stability)
+      this.lastDetectedPoints = [...bestPolyPoints]; // Clone the array
+
+      // Increment stability counter
+      this.detectionStabilityCount++; // Only consider it "stable" after STABILITY_THRESHOLD consecutive detections
+      if (this.detectionStabilityCount >= this.STABILITY_THRESHOLD) {
+        this.status.set(`Card Detected!`);
+
+        if (this.debugMode()) {
+          console.log(`[DEBUG] ✓ STABLE CARD DETECTED with score: ${Math.floor(maxScore)}`);
+        }
+
+        // Draw green detection box
+        ctx.strokeStyle = '#00FF00';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(bestPolyPoints[0].x, bestPolyPoints[0].y);
+        ctx.lineTo(bestPolyPoints[1].x, bestPolyPoints[1].y);
+        ctx.lineTo(bestPolyPoints[2].x, bestPolyPoints[2].y);
+        ctx.lineTo(bestPolyPoints[3].x, bestPolyPoints[3].y);
+        ctx.closePath();
+        ctx.stroke();
+
+        // Trigger OCR at intervals
+        const now = Date.now();
+        if (now - this.lastOcrTime > this.OCR_INTERVAL && !this.isProcessingOcr) {
+          this.lastOcrTime = now;
+          this.isProcessingOcr = true;
+          this.performOcr(pCanvas, bestPolyPoints).finally(() => {
+            this.isProcessingOcr = false;
+          });
+        }
+      } else {
+        this.status.set(
+          `Detecting... (${this.detectionStabilityCount}/${this.STABILITY_THRESHOLD})`
+        );
+
+        // Draw yellow detection box while stabilizing
+        ctx.strokeStyle = '#FFFF00';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(bestPolyPoints[0].x, bestPolyPoints[0].y);
+        ctx.lineTo(bestPolyPoints[1].x, bestPolyPoints[1].y);
+        ctx.lineTo(bestPolyPoints[2].x, bestPolyPoints[2].y);
+        ctx.lineTo(bestPolyPoints[3].x, bestPolyPoints[3].y);
+        ctx.closePath();
+        ctx.stroke();
+      }
+    } else {
+      // Reset stability counter and stored points if no detection
+      this.detectionStabilityCount = 0;
+      this.lastDetectedPoints = null;
+      this.status.set('Scanning...');
+      if (this.debugMode()) {
+        console.log(`[DEBUG] ✗ NO CARD DETECTED`);
+      }
     }
 
     this.animationFrameId = requestAnimationFrame(() => this.processFrame());
+  }
+
+  /**
+   * Main detection - uses ArUco markers only
+   */
+  async detectCard(
+    canvas: HTMLCanvasElement,
+    cv: any,
+    video: HTMLVideoElement
+  ): Promise<{ points: any[] | null; score: number }> {
+    // Use ArUco marker detection only - requires markers to be visible
+    const arucoResult = this.detectCardWithAruco(canvas, cv, video);
+    return arucoResult;
+  }
+
+  /**
+   * Detect card position using ArUco markers
+   * Assumes markers are placed at known positions relative to the card
+   */
+  detectCardWithAruco(
+    canvas: HTMLCanvasElement,
+    cv: any,
+    video: HTMLVideoElement
+  ): { points: any[] | null; score: number } {
+    let src: any;
+
+    try {
+      // Get image data from canvas for js-aruco2
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        return { points: null, score: 0 };
+      }
+
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+      // Create ArUco detector using ARUCO dictionary (default for js-aruco2)
+      // Note: js-aruco2 uses 'ARUCO' dictionary, not OpenCV's DICT_4X4_50
+      const detector = new AR.Detector({ dictionaryName: 'ARUCO' });
+
+      // Detect markers
+      const markers = detector.detect(imageData);
+
+      if (markers.length > 0) {
+        if (this.debugMode()) {
+          this.addLog(
+            `Detected ${markers.length} ArUco markers: ${markers.map((m) => m.id).join(', ')}`
+          );
+        }
+
+        // Draw detected markers in debug mode
+        if (this.debugMode() && this.ctx) {
+          // Draw on debug canvas
+          this.ctx.clearRect(0, 0, this.canvasElement!.width, this.canvasElement!.height);
+          this.ctx.drawImage(canvas, 0, 0, this.canvasElement!.width, this.canvasElement!.height);
+
+          // Draw markers
+          markers.forEach((marker) => {
+            this.ctx!.strokeStyle = '#00ff00';
+            this.ctx!.lineWidth = 3;
+            this.ctx!.beginPath();
+
+            const corners = marker.corners;
+            this.ctx!.moveTo(corners[0].x, corners[0].y);
+            for (let i = 1; i < corners.length; i++) {
+              this.ctx!.lineTo(corners[i].x, corners[i].y);
+            }
+            this.ctx!.closePath();
+            this.ctx!.stroke();
+
+            // Draw marker ID
+            const center = {
+              x: corners.reduce((sum, c) => sum + c.x, 0) / corners.length,
+              y: corners.reduce((sum, c) => sum + c.y, 0) / corners.length,
+            };
+            this.ctx!.fillStyle = '#00ff00';
+            this.ctx!.font = '20px Arial';
+            this.ctx!.fillText(`ID: ${marker.id}`, center.x, center.y);
+          });
+        }
+
+        // If we have at least 2 markers, we can infer the card position
+        if (markers.length >= 2) {
+          const cardPoints = this.calculateCardFromJsArucoMarkers(markers, cv);
+          if (cardPoints) {
+            return { points: cardPoints, score: 1000000 }; // High score for marker detection
+          }
+        }
+      }
+
+      return { points: null, score: 0 };
+    } catch (err) {
+      console.error('ArUco detection error:', err);
+      if (this.debugMode()) {
+        this.addLog(`ArUco error: ${err}`);
+      }
+      return { points: null, score: 0 };
+    } finally {
+      if (src) src.delete();
+    }
+  }
+
+  /**
+   * Calculate card corners from detected js-aruco2 markers using perspective transform and edge detection
+   */
+  calculateCardFromJsArucoMarkers(markers: any[], cv: any): any[] | null {
+    let warped: any;
+
+    try {
+      // Convert js-aruco2 markers to our format and identify by ID
+      const markerMap = new Map<number, any>();
+      markers.forEach((marker) => {
+        const center = {
+          x: marker.corners.reduce((sum: number, c: any) => sum + c.x, 0) / marker.corners.length,
+          y: marker.corners.reduce((sum: number, c: any) => sum + c.y, 0) / marker.corners.length,
+        };
+
+        if (this.debugMode()) {
+          this.addLog(`Marker ${marker.id} at (${Math.floor(center.x)}, ${Math.floor(center.y)})`);
+        }
+
+        markerMap.set(marker.id, {
+          id: marker.id,
+          center,
+          corners: marker.corners,
+        });
+      });
+
+      // Need all 4 markers - sort them by position to identify corners
+      if (markerMap.size < 4) {
+        if (this.debugMode()) {
+          this.addLog(
+            `Need 4 markers. Found ${markerMap.size}: ${Array.from(markerMap.keys()).join(', ')}`
+          );
+        }
+        return null;
+      }
+
+      // Sort markers by position to identify corners (top-left, top-right, bottom-right, bottom-left)
+      const markerArray = Array.from(markerMap.values());
+      markerArray.sort((a, b) => a.center.y - b.center.y); // Sort by Y
+      const topTwo = markerArray.slice(0, 2).sort((a, b) => a.center.x - b.center.x); // Sort top 2 by X
+      const bottomTwo = markerArray.slice(2, 4).sort((a, b) => a.center.x - b.center.x); // Sort bottom 2 by X
+
+      const m0 = topTwo[0].center; // top-left
+      const m1 = topTwo[1].center; // top-right
+      const m2 = bottomTwo[1].center; // bottom-right
+      const m3 = bottomTwo[0].center; // bottom-left
+
+      if (this.debugMode()) {
+        this.addLog(
+          `Corner markers: TL=${topTwo[0].id}, TR=${topTwo[1].id}, BR=${bottomTwo[1].id}, BL=${bottomTwo[0].id}`
+        );
+      }
+
+      // Create a perspective transform to flatten the paper
+      // Use a standard size for the warped image (e.g., 1000x1000)
+      const warpedSize = 1000;
+
+      const srcPoints = cv.matFromArray(4, 1, cv.CV_32FC2, [
+        m0.x,
+        m0.y, // top-left
+        m1.x,
+        m1.y, // top-right
+        m2.x,
+        m2.y, // bottom-right
+        m3.x,
+        m3.y, // bottom-left
+      ]);
+
+      const dstPoints = cv.matFromArray(4, 1, cv.CV_32FC2, [
+        0,
+        0, // top-left
+        warpedSize,
+        0, // top-right
+        warpedSize,
+        warpedSize, // bottom-right
+        0,
+        warpedSize, // bottom-left
+      ]);
+
+      const M = cv.getPerspectiveTransform(srcPoints, dstPoints);
+
+      // Get the source image from the canvas that was passed in
+      // Need to create a temporary canvas to read from since the passed canvas might be from video
+      const tempCanvas = document.createElement('canvas');
+      const videoElement = this.videoElement;
+      if (videoElement) {
+        tempCanvas.width = videoElement.videoWidth;
+        tempCanvas.height = videoElement.videoHeight;
+        const tempCtx = tempCanvas.getContext('2d');
+        if (tempCtx) {
+          tempCtx.drawImage(videoElement, 0, 0);
+        }
+      }
+
+      const src = cv.imread(tempCanvas);
+      warped = new cv.Mat();
+
+      // Apply perspective transform
+      cv.warpPerspective(src, warped, M, new cv.Size(warpedSize, warpedSize));
+
+      // Calculate card position based on known layout from create-pokemon-pdf.py:
+      // - Card: 63.5mm x 88.9mm
+      // - Gap: 10mm between card edge and marker center
+      // - Marker size: 20mm
+      // - Total marker-to-marker: Card + 2*Gap + Marker = 63.5+20+20=103.5mm (horizontal)
+      //                                                    88.9+20+20=128.9mm (vertical)
+      //
+      // In the warped image, markers are at (0,0), (warpedSize,0), (warpedSize,warpedSize), (0,warpedSize)
+      // So the card should be centered in the warped space
+
+      // Calculate card dimensions in warped space
+      // The marker centers span the full warped image (0 to warpedSize)
+      // From marker center to card edge: Gap + Marker/2 = 10 + 10 = 20mm
+      // From marker center to marker center: 103.5mm (horizontal), 128.9mm (vertical)
+
+      const totalWidthMM = 63.5 + 2 * 10 + 20; // Card + 2*Gap + Marker = 103.5mm
+      const totalHeightMM = 88.9 + 2 * 10 + 20; // Card + 2*Gap + Marker = 128.9mm
+      const cardWidthMM = 63.5;
+      const cardHeightMM = 88.9;
+      const gapMM = 10;
+      const markerSizeMM = 20;
+
+      // Margin from edge of warped image (marker center) to card edge in pixels
+      const marginX = ((gapMM + markerSizeMM / 2) / totalWidthMM) * warpedSize;
+      const marginY = ((gapMM + markerSizeMM / 2) / totalHeightMM) * warpedSize;
+
+      // Card dimensions in pixels
+      const cardWidthPx = (cardWidthMM / totalWidthMM) * warpedSize;
+      const cardHeightPx = (cardHeightMM / totalHeightMM) * warpedSize;
+
+      // Card position (top-left corner)
+      const cardX = marginX;
+      const cardY = marginY;
+
+      if (this.debugMode()) {
+        this.addLog(
+          `Calculated card position: ${Math.round(cardX)}, ${Math.round(cardY)}, size: ${Math.round(
+            cardWidthPx
+          )}x${Math.round(cardHeightPx)}`
+        );
+
+        // Draw the calculated card rectangle on the warped image
+        if (this.ctx && this.canvasElement) {
+          const debugCanvas = document.createElement('canvas');
+          debugCanvas.width = warpedSize;
+          debugCanvas.height = warpedSize;
+          cv.imshow(debugCanvas, warped);
+
+          const debugCtx = debugCanvas.getContext('2d');
+          if (debugCtx) {
+            debugCtx.strokeStyle = '#00ff00';
+            debugCtx.lineWidth = 3;
+            debugCtx.strokeRect(cardX, cardY, cardWidthPx, cardHeightPx);
+          }
+
+          this.ctx.clearRect(0, 0, this.canvasElement.width, this.canvasElement.height);
+          this.ctx.drawImage(
+            debugCanvas,
+            0,
+            0,
+            this.canvasElement.width,
+            this.canvasElement.height
+          );
+        }
+      }
+
+      // Get the 4 corners of the card in warped space based on calculated position
+      const warpedCardCorners = [
+        { x: cardX, y: cardY },
+        { x: cardX + cardWidthPx, y: cardY },
+        { x: cardX + cardWidthPx, y: cardY + cardHeightPx },
+        { x: cardX, y: cardY + cardHeightPx },
+      ];
+
+      // Transform these corners back to the original image space
+      const invM = new cv.Mat();
+      cv.invert(M, invM);
+
+      const cardPoints = warpedCardCorners.map((pt) => {
+        const srcPt = cv.matFromArray(1, 1, cv.CV_32FC2, [pt.x, pt.y]);
+        const dstPt = new cv.Mat();
+        cv.perspectiveTransform(srcPt, dstPt, invM);
+        const result = { x: dstPt.data32F[0], y: dstPt.data32F[1] };
+        srcPt.delete();
+        dstPt.delete();
+        return result;
+      });
+
+      invM.delete();
+      srcPoints.delete();
+      dstPoints.delete();
+      M.delete();
+      src.delete();
+
+      return null;
+    } catch (err) {
+      console.error('Error calculating card from markers:', err);
+      return null;
+    } finally {
+      if (warped) warped.delete();
+    }
   }
 
   async performOcr(imageCanvas: HTMLCanvasElement, pointsInput: any) {
@@ -550,10 +670,45 @@ export class ScannerComponent implements OnDestroy {
     const top = points.slice(0, 2).sort((a, b) => a.x - b.x);
     const bottom = points.slice(2, 4).sort((a, b) => a.x - b.x);
 
-    const tl = top[0];
-    const tr = top[1];
-    const bl = bottom[0];
-    const br = bottom[1];
+    let tl = top[0];
+    let tr = top[1];
+    let bl = bottom[0];
+    let br = bottom[1];
+
+    // Apply an inward margin (5% on each side) to avoid capturing background
+    // This ensures we only get the card content, not the area around it
+    // A larger margin is better for OCR accuracy - we don't need the very edges
+    const marginPercent = 0.05;
+
+    // Calculate the vectors for inward adjustment
+    const cardWidth = Math.sqrt(Math.pow(tr.x - tl.x, 2) + Math.pow(tr.y - tl.y, 2));
+    const cardHeight = Math.sqrt(Math.pow(bl.x - tl.x, 2) + Math.pow(bl.y - tl.y, 2));
+
+    const marginX = cardWidth * marginPercent;
+    const marginY = cardHeight * marginPercent;
+
+    // Move each corner inward
+    const dx_top = (tr.x - tl.x) / cardWidth; // normalized direction vector
+    const dy_top = (tr.y - tl.y) / cardWidth;
+    const dx_left = (bl.x - tl.x) / cardHeight;
+    const dy_left = (bl.y - tl.y) / cardHeight;
+
+    tl = {
+      x: tl.x + dx_top * marginX + dx_left * marginY,
+      y: tl.y + dy_top * marginX + dy_left * marginY,
+    };
+    tr = {
+      x: tr.x - dx_top * marginX + dx_left * marginY,
+      y: tr.y - dy_top * marginX + dy_left * marginY,
+    };
+    bl = {
+      x: bl.x + dx_top * marginX - dx_left * marginY,
+      y: bl.y + dy_top * marginX - dy_left * marginY,
+    };
+    br = {
+      x: br.x - dx_top * marginX - dx_left * marginY,
+      y: br.y - dy_top * marginX - dy_left * marginY,
+    };
 
     // Destination dimensions (Pokemon card ratio 63x88)
     // Let's use a high resolution for OCR
@@ -585,7 +740,7 @@ export class ScannerComponent implements OnDestroy {
       M,
       new cv.Size(width, height),
       cv.INTER_LINEAR,
-      cv.BORDER_CONSTANT,
+      cv.BORDER_REPLICATE,
       new cv.Scalar()
     );
 

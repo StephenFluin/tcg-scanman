@@ -33,6 +33,7 @@
     "@angular/ssr": "^21.0.3",
     "@techstark/opencv-js": "^4.12.0-release.1",
     "express": "^5.1.0",
+    "js-aruco2": "^2.0.0",
     "rxjs": "~7.8.0",
     "tesseract.js": "^6.0.1",
     "tslib": "^2.3.0"
