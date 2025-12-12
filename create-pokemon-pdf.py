@@ -12,17 +12,20 @@ MARKER_SIZE_MM = 20
 CARD_WIDTH_MM = 63.5
 CARD_HEIGHT_MM = 88.9
 GAP_MM = 10  # Gap between card and markers
-# Using ARUCO_ORIGINAL dictionary to match js-aruco2 library
-DICT_ID = aruco.DICT_ARUCO_ORIGINAL
+# Using ARUCO_MIP_36h12 dictionary (AprilTag-style markers)
+# This dictionary has better detection at various angles and distances
+# js-aruco2 library supports both 'ARUCO' and 'ARUCO_MIP_36h12'
+DICT_ID = aruco.DICT_ARUCO_MIP_36h12
 
 
 def generate_marker(id, size_pixels=200):
     """
     Generate an ArUco marker image.
 
-    Note: Using DICT_ARUCO_ORIGINAL (1024 markers) which is compatible with
-    js-aruco2 library used in the web scanner. This is the original ArUco
-    dictionary, not the smaller 4x4 or 5x5 variants.
+    Note: Using DICT_ARUCO_MIP_36h12 which is an AprilTag-style dictionary
+    optimized for better detection at various angles and lighting conditions.
+    js-aruco2 library supports this dictionary with the name 'ARUCO_MIP_36h12'.
+    This dictionary has 250 unique markers (IDs 0-249).
     """
     dictionary = aruco.getPredefinedDictionary(DICT_ID)
     marker_img = aruco.generateImageMarker(dictionary, id, size_pixels)

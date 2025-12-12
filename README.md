@@ -1,4 +1,31 @@
-# TcgScanman
+# TCG ScanMan - Pokemon Card Scanner
+
+An offline, open-source Angular application for scanning and cataloging Pokemon trading cards using computer vision and OCR technology.
+
+## Features
+
+- 📷 **Webcam Integration**: Access device cameras with permission management and device selection
+- 🎯 **ArUco Marker Detection**: Precise card positioning using OpenCV.js and ArUco markers
+- 🔍 **OCR Recognition**: Extract card details (name, HP, type, card number, rarity) using Tesseract.js
+- 💾 **Offline First**: Completely offline - no server required, no data sent anywhere
+- 📱 **Responsive Design**: Works on desktop and mobile devices
+- 🎨 **Real-time Feedback**: Live preview with card outline overlay when detected
+
+## How It Works
+
+1. **Camera Setup**: Grant camera permissions and select your preferred camera (saved to localStorage)
+2. **Card Positioning**: Place a Pokemon card in a 3D printed holder with ArUco markers
+3. **Detection**: The app detects the markers and calculates the exact card position
+4. **Recognition**: Once positioned correctly, OCR reads card details from top and bottom regions
+5. **Display**: All recognized information is shown in real-time on the right panel
+
+## Technology Stack
+
+- **Framework**: Angular 21 with standalone components
+- **Computer Vision**: OpenCV.js for ArUco marker detection
+- **OCR**: Tesseract.js for offline text recognition
+- **State Management**: Angular signals
+- **Styling**: Component-scoped SCSS
 
 This project was generated using [Angular CLI](https://github.com/angular/angular-cli) version 21.0.3.
 
