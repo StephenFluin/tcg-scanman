@@ -66,6 +66,15 @@ export interface CardPosition {
 }
 
 /**
+ * Marker detection log entry
+ */
+export interface MarkerDetectionLog {
+  timestamp: number;
+  markerId: number;
+  location: { x: number; y: number }; // Center of marker
+}
+
+/**
  * Scanning status
  */
 export interface ScanStatus {

@@ -1,5 +1,5 @@
 import { Component, input, ChangeDetectionStrategy } from '@angular/core';
-import type { CardPosition, PokemonCard } from '../../types/card.model';
+import type { CardPosition, MarkerDetectionLog, PokemonCard } from '../../types/card.model';
 
 /**
  * Component to display scanning status and recognized card data
@@ -42,6 +42,47 @@ import type { CardPosition, PokemonCard } from '../../types/card.model';
           </div>
           }
         </div>
+      </div>
+
+      @if (cardPreviewUrl()) {
+      <div class="status-section">
+        <h3>Card Preview (with Debug Overlays)</h3>
+        <div class="card-preview">
+          <img [src]="cardPreviewUrl()" alt="Extracted card preview" />
+          <div class="preview-legend">
+            <div class="legend-item">
+              <span class="legend-color" style="background: #ff0000;"></span>
+              <span>Red = Marker boundaries</span>
+            </div>
+            <div class="legend-item">
+              <span class="legend-color" style="background: #00ff00;"></span>
+              <span>Green = Calculated card corners</span>
+            </div>
+          </div>
+          <p class="preview-info">✓ Card extracted with {{ markersDetected() }} markers</p>
+          <p class="preview-note">Check console for detailed mathematical calculations</p>
+          <p class="preview-note">⏸️ Scanning paused for 30 seconds for debugging</p>
+        </div>
+      </div>
+      }
+
+      <div class="status-section">
+        <h3>Marker Detection Log</h3>
+        @if (markerLogs().length > 0) {
+        <div class="marker-log">
+          @for (log of markerLogs().slice(0, 10); track log.timestamp) {
+          <div class="log-entry">
+            <span class="log-time">{{ formatTime(log.timestamp) }}</span>
+            <span class="log-marker">Marker #{{ log.markerId }}</span>
+            <span class="log-location"
+              >({{ log.location.x.toFixed(0) }}, {{ log.location.y.toFixed(0) }})</span
+            >
+          </div>
+          }
+        </div>
+        } @else {
+        <p class="no-data">No markers detected yet...</p>
+        }
       </div>
 
       <div class="status-section">
@@ -310,6 +351,96 @@ import type { CardPosition, PokemonCard } from '../../types/card.model';
         padding: 2rem;
         margin: 0;
       }
+
+      .marker-log {
+        max-height: 300px;
+        overflow-y: auto;
+        background: #f9f9f9;
+        border-radius: 4px;
+        padding: 0.5rem;
+      }
+
+      .log-entry {
+        display: flex;
+        gap: 0.75rem;
+        padding: 0.5rem;
+        border-bottom: 1px solid #e0e0e0;
+        font-size: 0.85rem;
+        font-family: monospace;
+      }
+
+      .log-entry:last-child {
+        border-bottom: none;
+      }
+
+      .log-time {
+        color: #666;
+        min-width: 90px;
+      }
+
+      .log-marker {
+        color: #cc0000;
+        font-weight: bold;
+        min-width: 80px;
+      }
+
+      .log-location {
+        color: #333;
+      }
+
+      .card-preview {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 1rem;
+      }
+
+      .card-preview img {
+        max-width: 100%;
+        height: auto;
+        border: 2px solid #00ff00;
+        border-radius: 8px;
+        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+      }
+
+      .preview-legend {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+        width: 100%;
+        background: #f5f5f5;
+        padding: 0.75rem;
+        border-radius: 4px;
+        font-size: 0.85rem;
+      }
+
+      .legend-item {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+
+      .legend-color {
+        width: 20px;
+        height: 20px;
+        border-radius: 3px;
+        border: 1px solid #333;
+      }
+
+      .preview-info {
+        color: #00aa00;
+        font-weight: bold;
+        margin: 0;
+        text-align: center;
+      }
+
+      .preview-note {
+        color: #666;
+        font-size: 0.85rem;
+        font-style: italic;
+        margin: 0;
+        text-align: center;
+      }
     `,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -318,6 +449,8 @@ export class ScanStatusComponent {
   readonly markersDetected = input.required<number>();
   readonly cardPosition = input<CardPosition | null>(null);
   readonly recognizedData = input<Partial<PokemonCard>>({});
+  readonly markerLogs = input<MarkerDetectionLog[]>([]);
+  readonly cardPreviewUrl = input<string | null>(null);
 
   protected hasRecognizedData(): boolean {
     const data = this.recognizedData();
@@ -329,5 +462,16 @@ export class ScanStatusComponent {
       data.cardNumber ||
       (data.rarity && data.rarity !== 'Unknown')
     );
+  }
+
+  protected formatTime(timestamp: number): string {
+    const date = new Date(timestamp);
+    return date.toLocaleTimeString('en-US', {
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      fractionalSecondDigits: 1,
+    });
   }
 }

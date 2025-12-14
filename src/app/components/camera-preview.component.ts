@@ -11,7 +11,12 @@ import {
 import { CameraService } from '../services/camera.service';
 import { ArucoService } from '../services/aruco.service';
 import { OcrService } from '../services/ocr.service';
-import type { CardPosition, MarkerDetection, PokemonCard } from '../../types/card.model';
+import type {
+  CardPosition,
+  MarkerDetection,
+  MarkerDetectionLog,
+  PokemonCard,
+} from '../../types/card.model';
 
 /**
  * Component to display camera preview and handle card scanning
@@ -39,7 +44,11 @@ import type { CardPosition, MarkerDetection, PokemonCard } from '../../types/car
           [class.card-detected]="cardPosition() !== null"
         ></video>
 
-        <svg class="overlay">
+        <svg
+          class="overlay"
+          [attr.viewBox]="'0 0 ' + videoSize().width + ' ' + videoSize().height"
+          preserveAspectRatio="xMidYMid slice"
+        >
           <!-- Draw detected markers -->
           @for (marker of markers(); track marker.id) {
           <polygon [attr.points]="getMarkerPolygonPoints(marker)" class="marker-outline" />
@@ -227,8 +236,13 @@ export class CameraPreviewComponent implements OnDestroy {
   readonly markers = signal<MarkerDetection[]>([]);
   readonly cardPosition = signal<CardPosition | null>(null);
   readonly recognizedData = signal<Partial<PokemonCard>>({});
+  readonly markerLogs = signal<MarkerDetectionLog[]>([]);
+  readonly cardPreviewUrl = signal<string | null>(null);
+  readonly videoSize = signal<{ width: number; height: number }>({ width: 0, height: 0 });
   private scanningIntervalId: number | null = null;
   private ocrIntervalId: number | null = null;
+  private lastExtractedMarkerCount = 0;
+  private cardDetectionPauseUntil = 0;
 
   protected readonly currentDeviceIndex = computed(() => {
     const devices = this.cameraService.devices();
@@ -283,13 +297,72 @@ export class CameraPreviewComponent implements OnDestroy {
         return;
       }
 
+      // Check if we're in the pause period after card detection
+      const now = Date.now();
+      if (now < this.cardDetectionPauseUntil) {
+        const remainingSeconds = Math.ceil((this.cardDetectionPauseUntil - now) / 1000);
+        if (remainingSeconds % 5 === 0) {
+          console.log(`⏸️  Paused for debugging (${remainingSeconds}s remaining)`);
+        }
+        return;
+      }
+
+      // Update video size for SVG viewBox
+      if (video.videoWidth > 0 && video.videoHeight > 0) {
+        this.videoSize.set({ width: video.videoWidth, height: video.videoHeight });
+      }
+
       // Detect markers (async)
-      const detectedMarkers = await this.arucoService.detectMarkers(video);
+      const allDetectedMarkers = await this.arucoService.detectMarkers(video);
+
+      // Filter to only markers 0-3 (the corner markers for the card)
+      const detectedMarkers = allDetectedMarkers.filter((m) => m.id >= 0 && m.id <= 3);
       this.markers.set(detectedMarkers);
+
+      // Log newly detected markers
+      if (detectedMarkers.length > 0) {
+        const timestamp = Date.now();
+        const newLogs: MarkerDetectionLog[] = detectedMarkers.map((marker) => {
+          const center = this.getMarkerCenter(marker);
+          return {
+            timestamp,
+            markerId: marker.id,
+            location: center,
+          };
+        });
+
+        // Keep only the last 20 log entries
+        this.markerLogs.update((logs) => [...newLogs, ...logs].slice(0, 20));
+      }
 
       // Calculate card position
       const position = this.arucoService.calculateCardPosition(detectedMarkers);
       this.cardPosition.set(position);
+
+      // Extract card preview when we have a valid position
+      // This will be when we have markers 0&3, or 1&2, or more markers
+      if (position && detectedMarkers.length !== this.lastExtractedMarkerCount) {
+        this.lastExtractedMarkerCount = detectedMarkers.length;
+        const cardImageUrl = this.arucoService.extractCardImage(
+          video,
+          position,
+          detectedMarkers,
+          true
+        );
+        if (cardImageUrl) {
+          this.cardPreviewUrl.set(cardImageUrl);
+          console.log(
+            `✅ Extracted card preview with ${
+              detectedMarkers.length
+            } markers (IDs: ${detectedMarkers.map((m) => m.id).join(', ')})`
+          );
+          console.log('⏸️  Pausing scanning for 30 seconds for debugging...');
+          // Pause scanning for 30 seconds after card detection
+          this.cardDetectionPauseUntil = Date.now() + 30000;
+        }
+      } else if (!position) {
+        this.lastExtractedMarkerCount = 0;
+      }
 
       // If card is detected with high confidence, perform OCR
       if (position && position.confidence > 0.7) {

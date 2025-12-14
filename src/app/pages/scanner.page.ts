@@ -19,6 +19,8 @@ import { ScanStatusComponent } from '../components/scan-status.component';
             [markersDetected]="cameraPreview.markers().length"
             [cardPosition]="cameraPreview.cardPosition()"
             [recognizedData]="cameraPreview.recognizedData()"
+            [markerLogs]="cameraPreview.markerLogs()"
+            [cardPreviewUrl]="cameraPreview.cardPreviewUrl()"
           />
         </div>
       </div>
