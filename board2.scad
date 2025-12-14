@@ -65,14 +65,10 @@ module main() {
 }
 
 module draw_marker(id) {
-    // Center the marker drawing
     translate([-marker_size/2, -marker_size/2, 0]) {
-        
-        // A. Draw Black Border (The "Quiet Zone" is handled by the white base underneath)
+        // A. Draw Black Border
         difference() {
             cube([marker_size, marker_size, marker_z_lift]);
-            
-            // Cut out the inner area for the grid bits
             translate([pixel_size, pixel_size, -0.1])
             cube([marker_size - 2*pixel_size, marker_size - 2*pixel_size, marker_z_lift + 0.2]);
         }
@@ -82,10 +78,7 @@ module draw_marker(id) {
         
         for (r = [0 : marker_grid_n-1]) {
             for (c = [0 : marker_grid_n-1]) {
-                // In OpenSCAD, row 0 is typically bottom, but ArUco matrices are top-left.
-                // We map row r (0 at top) to Y position.
-                // y = (marker_grid_n - 1 - r) * pixel_size + border_offset
-                
+                // Map array rows to OpenSCAD Y-axis (Top-Down vs Bottom-Up)
                 if (bits[r][c] == 1) {
                     translate([
                         (c + 1) * pixel_size, 
@@ -99,40 +92,40 @@ module draw_marker(id) {
     }
 }
 
-// --- DATA SECTION: UPDATE THESE MATRICES ---
+// --- CORRECTED BIT MATRICES ---
 // 1 = Raised (Black), 0 = Empty (White Base shows through)
 function get_marker_bits(id) = 
     (id == 0) ? [
-        [1,0,1,0,1,0], // Row 0 (Top)
-        [0,1,0,1,0,1],
-        [1,0,1,0,1,0],
-        [0,1,0,1,0,1],
-        [1,0,1,0,1,0],
-        [0,1,0,1,0,1]  // Row 5 (Bottom)
+        [0,0,1,0,1,1],
+        [0,1,0,1,0,0],
+        [1,0,0,1,1,1],
+        [0,0,0,1,0,1],
+        [1,1,1,1,0,1],
+        [1,0,0,0,1,0]
     ] :
     (id == 1) ? [
-        [1,1,0,0,1,1], 
-        [1,1,0,0,1,1],
-        [0,0,1,1,0,0],
-        [0,0,1,1,0,0],
-        [1,1,0,0,1,1],
-        [1,1,0,0,1,1]
+        [1,0,0,1,1,1],
+        [1,1,1,1,1,1],
+        [1,1,1,0,1,1],
+        [1,0,1,1,0,0],
+        [1,0,1,1,0,0],
+        [0,1,1,0,1,0]
     ] :
     (id == 2) ? [
-        [1,1,1,0,0,0], 
-        [1,0,0,0,0,0],
-        [1,0,0,0,0,0],
-        [1,0,0,0,0,0],
-        [1,0,0,0,0,0],
-        [1,1,1,0,0,0]
+        [1,1,1,0,1,1],
+        [0,1,1,1,1,1],
+        [1,0,0,1,0,0],
+        [0,0,0,1,0,0],
+        [0,0,0,1,1,0],
+        [0,0,1,1,0,1]
     ] :
     (id == 3) ? [
-        [0,0,0,1,1,1], 
-        [0,0,0,0,0,1],
-        [0,0,0,0,0,1],
-        [0,0,0,0,0,1],
-        [0,0,0,0,0,1],
-        [0,0,0,1,1,1]
-    ] : []; // Default empty
+        [0,0,0,0,0,0],
+        [0,0,0,1,1,1],
+        [0,1,0,1,0,0],
+        [1,0,1,0,0,1],
+        [0,0,1,1,0,1],
+        [0,0,1,0,1,1]
+    ] : [];
 
 main();

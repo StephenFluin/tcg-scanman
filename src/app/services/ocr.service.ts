@@ -18,16 +18,21 @@ export class OcrService {
 
   /**
    * Initialize Tesseract worker
+   * Pokemon cards use fonts similar to Gill Sans, Futura, or Helvetica
    */
   private async initialize(): Promise<void> {
     try {
       this.worker = await createWorker('eng');
       await this.worker.setParameters({
+        // Optimize for Pokemon card fonts (sans-serif, bold)
         tessedit_char_whitelist:
-          'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-/HP ',
+          "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-/HP '♂♀",
+        preserve_interword_spaces: '1',
       });
       this.isInitialized = true;
-      console.log('OCR initialized');
+      console.log(
+        '✅ OCR initialized with Pokemon card font optimization (Gill Sans/Helvetica style)'
+      );
     } catch (err) {
       console.error('Failed to initialize OCR:', err);
     }
@@ -35,8 +40,9 @@ export class OcrService {
 
   /**
    * Recognize text from an image
+   * Applies preprocessing to improve OCR accuracy for Pokemon card fonts
    */
-  async recognizeText(imageData: ImageData): Promise<string> {
+  async recognizeText(imageData: ImageData, isCardNumber: boolean = false): Promise<string> {
     if (!this.isInitialized || !this.worker) {
       console.warn('OCR not initialized');
       return '';
@@ -53,12 +59,55 @@ export class OcrService {
       }
       ctx.putImageData(imageData, 0, 0);
 
+      // Preprocess image for better OCR
+      this.preprocessForOCR(ctx, canvas.width, canvas.height);
+
+      // Configure OCR parameters based on content type
+      if (isCardNumber) {
+        // Optimize for card numbers (##/### or ###/### format)
+        await this.worker.setParameters({
+          tessedit_char_whitelist: '0123456789/',
+          preserve_interword_spaces: '0',
+        });
+      } else {
+        // Reset to normal text recognition
+        await this.worker.setParameters({
+          tessedit_char_whitelist:
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-/HP '♂♀",
+          preserve_interword_spaces: '1',
+        });
+      }
+
       const result = await this.worker.recognize(canvas);
-      return result.data.text.trim();
+      let text = result.data.text.trim();
+
+      // Post-process card numbers to ensure correct format
+      if (isCardNumber) {
+        text = this.cleanCardNumber(text);
+      }
+
+      return text;
     } catch (err) {
       console.error('OCR recognition error:', err);
       return '';
     }
+  }
+
+  /**
+   * Clean and validate card number format
+   * Expected formats: ##/##, ##/###, ###/###
+   */
+  private cleanCardNumber(text: string): string {
+    // Remove any whitespace
+    text = text.replace(/\s+/g, '');
+
+    // Look for pattern: digits/digits
+    const match = text.match(/(\d{1,3})\/(\d{1,3})/);
+    if (match) {
+      return `${match[1]}/${match[2]}`;
+    }
+
+    return text;
   }
 
   /**
@@ -188,6 +237,29 @@ export class OcrService {
     if (lowerText.includes('colorless')) return 'Colorless';
 
     return 'Unknown';
+  }
+
+  /**
+   * Preprocess image to improve OCR accuracy for Pokemon card fonts
+   * Enhances contrast and sharpness for better text recognition
+   */
+  private preprocessForOCR(ctx: CanvasRenderingContext2D, width: number, height: number): void {
+    const imageData = ctx.getImageData(0, 0, width, height);
+    const data = imageData.data;
+
+    // Apply contrast enhancement and slight sharpening
+    for (let i = 0; i < data.length; i += 4) {
+      // Increase contrast (works well for bold sans-serif text)
+      const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
+      const contrast = 1.3; // Increase contrast by 30%
+
+      for (let j = 0; j < 3; j++) {
+        let value = (data[i + j] - 128) * contrast + 128;
+        data[i + j] = Math.max(0, Math.min(255, value));
+      }
+    }
+
+    ctx.putImageData(imageData, 0, 0);
   }
 
   /**

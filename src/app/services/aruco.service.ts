@@ -688,11 +688,16 @@ export class ArucoService {
         canvas.height
       );
 
-      // Extract top 25% region
-      const topHeight = Math.floor(canvas.height * 0.25);
-      const topRegion = ctx.getImageData(0, 0, canvas.width, topHeight);
+      // Extract card name region (center strip, avoiding "Basic" at top and HP on right)
+      // Card name is typically 10-20% from top, centered horizontally
+      const nameStartY = Math.floor(canvas.height * 0.1); // Start at 10% from top
+      const nameHeight = Math.floor(canvas.height * 0.1); // 10% height band
+      const nameStartX = Math.floor(canvas.width * 0.05); // Start 5% from left edge
+      const nameWidth = Math.floor(canvas.width * 0.65); // Use 65% of width (avoid HP on right)
 
-      // Extract bottom 10% region
+      const topRegion = ctx.getImageData(nameStartX, nameStartY, nameWidth, nameHeight);
+
+      // Extract bottom 10% region (for card number, set info)
       const bottomHeight = Math.floor(canvas.height * 0.1);
       const bottomY = canvas.height - bottomHeight;
       const bottomRegion = ctx.getImageData(0, bottomY, canvas.width, bottomHeight);

@@ -46,7 +46,7 @@ import type { CardPosition, MarkerDetectionLog, PokemonCard } from '../../types/
           </div>
           <p class="preview-info">✓ Card extracted with {{ markersDetected() }} markers</p>
           <p class="preview-note">Check console for detailed mathematical calculations</p>
-          <p class="preview-note">⏸️ Scanning paused for 30 seconds for debugging</p>
+          <p class="preview-note">⏸️ Scanning paused for 5 seconds</p>
         </div>
       </div>
       }
@@ -76,12 +76,12 @@ import type { CardPosition, MarkerDetectionLog, PokemonCard } from '../../types/
         <div class="ocr-results">
           @if (recognizedData().topText) {
           <div class="ocr-region">
-            <h4>Top 25% of Card:</h4>
+            <h4>Card Name Region (center, 10-20% from top):</h4>
             <pre class="ocr-text">{{ recognizedData().topText }}</pre>
           </div>
           } @if (recognizedData().bottomText) {
           <div class="ocr-region">
-            <h4>Bottom 10% of Card:</h4>
+            <h4>Bottom 10% (card number/set):</h4>
             <pre class="ocr-text">{{ recognizedData().bottomText }}</pre>
           </div>
           }

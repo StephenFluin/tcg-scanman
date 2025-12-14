@@ -30,6 +30,7 @@ import type {
       <div class="permission-prompt">
         <h2>Camera Access Required</h2>
         <p>This app needs access to your camera to scan Pokemon cards.</p>
+        <p class="https-note">📱 On mobile devices, this site must be accessed via HTTPS.</p>
         <button (click)="requestPermissions()" class="btn-primary">Grant Camera Access</button>
         @if (cameraService.error()) {
         <p class="error">{{ cameraService.error() }}</p>
@@ -66,21 +67,21 @@ import type {
           <polygon [attr.points]="getPolygonPoints(position)" class="card-outline" />
           }
         </svg>
+      </div>
 
-        <div class="controls">
-          <button
-            (click)="changeCamera()"
-            class="btn-secondary"
-            [disabled]="cameraService.devices().length <= 1"
+      <div class="controls">
+        <button
+          (click)="changeCamera()"
+          class="btn-secondary"
+          [disabled]="cameraService.devices().length <= 1"
+        >
+          <span class="icon">📷</span>
+          Change Camera @if (cameraService.devices().length > 1) {
+          <span class="device-count"
+            >({{ currentDeviceIndex() + 1 }}/{{ cameraService.devices().length }})</span
           >
-            <span class="icon">📷</span>
-            Change Camera @if (cameraService.devices().length > 1) {
-            <span class="device-count"
-              >({{ currentDeviceIndex() + 1 }}/{{ cameraService.devices().length }})</span
-            >
-            }
-          </button>
-        </div>
+          }
+        </button>
       </div>
       }
     </div>
@@ -110,6 +111,13 @@ import type {
       .permission-prompt p {
         color: #666;
         margin: 1rem 0;
+      }
+
+      .https-note {
+        font-size: 0.9rem;
+        color: #ff8800;
+        font-weight: 500;
+        margin: 0.5rem 0 1.5rem 0 !important;
       }
 
       .btn-primary {
@@ -209,12 +217,10 @@ import type {
       }
 
       .controls {
-        position: absolute;
-        bottom: 1rem;
-        left: 50%;
-        transform: translateX(-50%);
         display: flex;
+        justify-content: center;
         gap: 1rem;
+        margin-top: 1rem;
       }
 
       .icon {
@@ -359,9 +365,9 @@ export class CameraPreviewComponent implements OnDestroy {
           // Perform OCR on card regions
           this.performOCR(video, position);
 
-          console.log('⏸️  Pausing scanning for 30 seconds for debugging...');
-          // Pause scanning for 30 seconds after card detection
-          this.cardDetectionPauseUntil = Date.now() + 30000;
+          console.log('⏸️  Pausing scanning for 5 seconds...');
+          // Pause scanning for 5 seconds after card detection
+          this.cardDetectionPauseUntil = Date.now() + 5000;
         }
       } else {
         this.cardPreviewUrl.set(null);
@@ -394,19 +400,19 @@ export class CameraPreviewComponent implements OnDestroy {
       // Extract card regions for OCR
       const regions = this.arucoService.extractCardRegionsForOCR(video, position);
 
-      // Process top region (25%)
+      // Process card name region (10-20% from top, center strip)
       if (regions.topRegion) {
-        console.log('  Analyzing top 25% of card...');
+        console.log('  Analyzing card name region (center strip, 10-20% from top)...');
         const topText = await this.ocrService.recognizeText(regions.topRegion);
-        console.log('  Top text:', topText);
+        console.log('  Card name text:', topText);
         const topData = this.ocrService.parseTopSection(topText);
         this.recognizedData.update((current) => ({ ...current, ...topData, topText }));
       }
 
-      // Process bottom region (10%)
+      // Process bottom region (10%) - optimized for card numbers
       if (regions.bottomRegion) {
-        console.log('  Analyzing bottom 10% of card...');
-        const bottomText = await this.ocrService.recognizeText(regions.bottomRegion);
+        console.log('  Analyzing bottom 10% of card (card number format: ##/### or ###/###)...');
+        const bottomText = await this.ocrService.recognizeText(regions.bottomRegion, true); // true = card number mode
         console.log('  Bottom text:', bottomText);
         const bottomData = this.ocrService.parseBottomSection(bottomText);
         this.recognizedData.update((current) => ({ ...current, ...bottomData, bottomText }));

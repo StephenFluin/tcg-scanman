@@ -9,9 +9,8 @@ print("// Paste these matrices into the get_marker_bits function in OpenSCAD")
 print("// 1 = Raised (Black/Marker Color), 0 = Recessed (White/Base Color)\n")
 
 for id in [0, 1, 2, 3]:
-    # Generate the marker image (6x6 pixels + 1 bit border)
-    # We generate it small so we can read the pixels directly
-    img = aruco.drawMarker(aruco_dict, id, 8, 1)
+    # FIX: drawMarker was renamed to generateImageMarker in newer OpenCV versions
+    img = aruco.generateImageMarker(aruco_dict, id, 8, 1)
 
     # Crop to just the inner 6x6 grid (remove the black border)
     # The border is 1 pixel wide, so we take from index 1 to 7

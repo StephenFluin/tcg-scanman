@@ -32,6 +32,12 @@ export class CameraService {
    */
   private async checkExistingPermissions(): Promise<void> {
     try {
+      // Check if mediaDevices API is available first
+      if (!navigator.mediaDevices) {
+        console.warn('MediaDevices API not available. Site must be served over HTTPS.');
+        return;
+      }
+
       // Check if Permissions API is available
       if (navigator.permissions && navigator.permissions.query) {
         const permissionStatus = await navigator.permissions.query({
@@ -67,6 +73,11 @@ export class CameraService {
     try {
       this.error.set(null);
 
+      // Check if mediaDevices API is available
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error('Camera API not available. Please use HTTPS or a supported browser.');
+      }
+
       // Request initial permission with any camera
       const tempStream = await navigator.mediaDevices.getUserMedia({
         video: true,
@@ -91,6 +102,7 @@ export class CameraService {
       const errorMessage = err instanceof Error ? err.message : 'Failed to access camera';
       this.error.set(errorMessage);
       this.permissionGranted.set(false);
+      console.error('Camera permission error:', err);
       return false;
     }
   }
@@ -100,6 +112,9 @@ export class CameraService {
    */
   private async enumerateDevices(): Promise<void> {
     try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+        throw new Error('Device enumeration not available');
+      }
       const allDevices = await navigator.mediaDevices.enumerateDevices();
       const videoDevices = allDevices.filter((device) => device.kind === 'videoinput');
       this.devices.set(videoDevices);
