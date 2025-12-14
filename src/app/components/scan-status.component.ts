@@ -26,21 +26,6 @@ import type { CardPosition, MarkerDetectionLog, PokemonCard } from '../../types/
               {{ cardPosition() ? 'Detected' : 'Not Detected' }}
             </span>
           </div>
-          @if (cardPosition(); as position) {
-          <div class="status-item full-width">
-            <span class="label">Confidence:</span>
-            <div class="confidence-bar">
-              <div
-                class="confidence-fill"
-                [style.width.%]="position.confidence * 100"
-                [class.high]="position.confidence > 0.7"
-                [class.medium]="position.confidence > 0.4 && position.confidence <= 0.7"
-                [class.low]="position.confidence <= 0.4"
-              ></div>
-              <span class="confidence-text">{{ (position.confidence * 100).toFixed(0) }}%</span>
-            </div>
-          </div>
-          }
         </div>
       </div>
 
@@ -84,6 +69,25 @@ import type { CardPosition, MarkerDetectionLog, PokemonCard } from '../../types/
         <p class="no-data">No markers detected yet...</p>
         }
       </div>
+
+      @if (recognizedData().topText || recognizedData().bottomText) {
+      <div class="status-section">
+        <h3>OCR Results</h3>
+        <div class="ocr-results">
+          @if (recognizedData().topText) {
+          <div class="ocr-region">
+            <h4>Top 25% of Card:</h4>
+            <pre class="ocr-text">{{ recognizedData().topText }}</pre>
+          </div>
+          } @if (recognizedData().bottomText) {
+          <div class="ocr-region">
+            <h4>Bottom 10% of Card:</h4>
+            <pre class="ocr-text">{{ recognizedData().bottomText }}</pre>
+          </div>
+          }
+        </div>
+      </div>
+      }
 
       <div class="status-section">
         <h3>Card Information</h3>
@@ -238,6 +242,43 @@ import type { CardPosition, MarkerDetectionLog, PokemonCard } from '../../types/
         font-size: 0.85rem;
         font-weight: bold;
         color: #333;
+      }
+
+      .ocr-results {
+        background: #f5f5f5;
+        border-radius: 4px;
+        padding: 1rem;
+      }
+
+      .ocr-region {
+        margin-bottom: 1rem;
+      }
+
+      .ocr-region:last-child {
+        margin-bottom: 0;
+      }
+
+      .ocr-region h4 {
+        margin: 0 0 0.5rem 0;
+        color: #666;
+        font-size: 0.9rem;
+        font-weight: 600;
+      }
+
+      .ocr-text {
+        background: white;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        padding: 0.75rem;
+        margin: 0;
+        font-family: monospace;
+        font-size: 0.85rem;
+        line-height: 1.4;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        color: #333;
+        max-height: 150px;
+        overflow-y: auto;
       }
 
       .card-info {

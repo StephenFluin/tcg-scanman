@@ -341,8 +341,7 @@ export class CameraPreviewComponent implements OnDestroy {
 
       // Extract card preview when we have a valid position
       // This will be when we have markers 0&3, or 1&2, or more markers
-      if (position && detectedMarkers.length !== this.lastExtractedMarkerCount) {
-        this.lastExtractedMarkerCount = detectedMarkers.length;
+      if (position) {
         const cardImageUrl = this.arucoService.extractCardImage(
           video,
           position,
@@ -356,17 +355,17 @@ export class CameraPreviewComponent implements OnDestroy {
               detectedMarkers.length
             } markers (IDs: ${detectedMarkers.map((m) => m.id).join(', ')})`
           );
+
+          // Perform OCR on card regions
+          this.performOCR(video, position);
+
           console.log('⏸️  Pausing scanning for 30 seconds for debugging...');
           // Pause scanning for 30 seconds after card detection
           this.cardDetectionPauseUntil = Date.now() + 30000;
         }
-      } else if (!position) {
-        this.lastExtractedMarkerCount = 0;
-      }
-
-      // If card is detected with high confidence, perform OCR
-      if (position && position.confidence > 0.7) {
-        this.performOCR(video, position);
+      } else {
+        this.cardPreviewUrl.set(null);
+        this.recognizedData.set({});
       }
     }, 1000); // 1 FPS (once per second)
   }
@@ -389,34 +388,34 @@ export class CameraPreviewComponent implements OnDestroy {
    * Perform OCR on card regions
    */
   private async performOCR(video: HTMLVideoElement, position: CardPosition): Promise<void> {
-    // Throttle OCR to avoid overwhelming the system
-    if (this.ocrIntervalId !== null) {
-      return;
-    }
+    try {
+      console.log('🔤 Performing OCR on card regions...');
 
-    this.ocrIntervalId = window.setTimeout(async () => {
-      try {
-        // Extract and process top region
-        const topRegion = this.arucoService.extractCardRegion(video, position, 'top');
-        if (topRegion) {
-          const topText = await this.ocrService.recognizeText(topRegion);
-          const topData = this.ocrService.parseTopSection(topText);
-          this.recognizedData.update((current) => ({ ...current, ...topData }));
-        }
+      // Extract card regions for OCR
+      const regions = this.arucoService.extractCardRegionsForOCR(video, position);
 
-        // Extract and process bottom region
-        const bottomRegion = this.arucoService.extractCardRegion(video, position, 'bottom');
-        if (bottomRegion) {
-          const bottomText = await this.ocrService.recognizeText(bottomRegion);
-          const bottomData = this.ocrService.parseBottomSection(bottomText);
-          this.recognizedData.update((current) => ({ ...current, ...bottomData }));
-        }
-      } catch (err) {
-        console.error('OCR error:', err);
-      } finally {
-        this.ocrIntervalId = null;
+      // Process top region (25%)
+      if (regions.topRegion) {
+        console.log('  Analyzing top 25% of card...');
+        const topText = await this.ocrService.recognizeText(regions.topRegion);
+        console.log('  Top text:', topText);
+        const topData = this.ocrService.parseTopSection(topText);
+        this.recognizedData.update((current) => ({ ...current, ...topData, topText }));
       }
-    }, 2000); // Perform OCR every 2 seconds
+
+      // Process bottom region (10%)
+      if (regions.bottomRegion) {
+        console.log('  Analyzing bottom 10% of card...');
+        const bottomText = await this.ocrService.recognizeText(regions.bottomRegion);
+        console.log('  Bottom text:', bottomText);
+        const bottomData = this.ocrService.parseBottomSection(bottomText);
+        this.recognizedData.update((current) => ({ ...current, ...bottomData, bottomText }));
+      }
+
+      console.log('✅ OCR complete');
+    } catch (err) {
+      console.error('❌ OCR error:', err);
+    }
   }
 
   /**

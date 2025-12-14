@@ -44,6 +44,8 @@ export interface PokemonCard {
   totalCards: string;
   rarity: CardRarity;
   confidence: number; // 0-1 confidence score for OCR accuracy
+  topText?: string; // Raw OCR text from top 25%
+  bottomText?: string; // Raw OCR text from bottom 10%
 }
 
 /**

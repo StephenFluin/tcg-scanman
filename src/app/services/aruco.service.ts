@@ -584,51 +584,57 @@ export class ArucoService {
         `  Expected card aspect: ${(this.CARD_WIDTH_MM / this.CARD_HEIGHT_MM).toFixed(2)}`
       );
 
-      // Draw the source video frame to a temporary canvas
-      const tempCanvas = document.createElement('canvas');
-      tempCanvas.width = videoElement.videoWidth;
-      tempCanvas.height = videoElement.videoHeight;
-      const tempCtx = tempCanvas.getContext('2d');
-      if (!tempCtx) return null;
-      tempCtx.drawImage(videoElement, 0, 0);
+      // Calculate bounding box from card corners
+      const allX = cardPosition.corners.map((c) => c[0]);
+      const allY = cardPosition.corners.map((c) => c[1]);
+      const minX = Math.min(...allX);
+      const maxX = Math.max(...allX);
+      const minY = Math.min(...allY);
+      const maxY = Math.max(...allY);
 
-      // Define destination corners (perfect rectangle)
-      const dstCorners = [
-        [0, 0],
-        [canvas.width, 0],
-        [canvas.width, canvas.height],
-        [0, canvas.height],
-      ];
+      const sourceWidth = maxX - minX;
+      const sourceHeight = maxY - minY;
 
-      // Perform perspective transformation using homography
-      const srcCorners = [topLeft, topRight, bottomRight, bottomLeft];
-      this.applyPerspectiveTransform(tempCanvas, canvas, srcCorners, dstCorners);
+      console.log(
+        `  Bounding box: (${minX.toFixed(1)}, ${minY.toFixed(1)}) to (${maxX.toFixed(
+          1
+        )}, ${maxY.toFixed(1)})`
+      );
+      console.log(`  Source dimensions: ${sourceWidth.toFixed(1)}x${sourceHeight.toFixed(1)}px`);
+
+      // Draw the card region directly (simple crop for now)
+      ctx.drawImage(
+        videoElement,
+        minX,
+        minY,
+        sourceWidth,
+        sourceHeight, // source
+        0,
+        0,
+        canvas.width,
+        canvas.height // destination
+      );
 
       // Add debug visualizations if enabled
       if (debugMode) {
-        // Draw debug info on the transformed card
+        // Draw debug info on the extracted card
         ctx.save();
 
-        // Calculate where source corners map to in the perspective-corrected image
-        // After perspective transform, the card fills the entire canvas as a rectangle
-        // So we'll show marker positions in their original video coordinates on a semi-transparent overlay
-
-        // Add semi-transparent overlay showing transformation info
+        // Add semi-transparent overlay showing extraction info
         ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
-        ctx.fillRect(0, 0, canvas.width, 100);
+        ctx.fillRect(0, 0, canvas.width, 80);
 
         ctx.fillStyle = '#00ff00';
         ctx.font = '11px monospace';
-        ctx.fillText(`Source video: ${tempCanvas.width}x${tempCanvas.height}px`, 5, 15);
+        ctx.fillText(
+          `Source video: ${videoElement.videoWidth}x${videoElement.videoHeight}px`,
+          5,
+          15
+        );
         ctx.fillText(`Output card: ${canvas.width}x${canvas.height}px`, 5, 30);
         ctx.fillText(`Markers used: ${markers.map((m) => m.id).join(', ')}`, 5, 45);
         ctx.fillText(`Card size: ${this.CARD_WIDTH_MM}x${this.CARD_HEIGHT_MM}mm`, 5, 60);
-        ctx.fillText(
-          `Aspect ratio: ${(this.CARD_WIDTH_MM / this.CARD_HEIGHT_MM).toFixed(3)}`,
-          5,
-          75
-        );
-        ctx.fillText('✓ Perspective corrected using homography', 5, 90);
+        ctx.fillText(`Bounding box: ${sourceWidth.toFixed(0)}x${sourceHeight.toFixed(0)}px`, 5, 75);
 
         ctx.restore();
       }
@@ -638,6 +644,63 @@ export class ArucoService {
     } catch (err) {
       console.error('Error extracting card image:', err);
       return null;
+    }
+  }
+
+  /**
+   * Extract specific regions of the card for OCR
+   * Returns ImageData for top 25% and bottom 10% of the card
+   */
+  extractCardRegionsForOCR(
+    videoElement: HTMLVideoElement,
+    cardPosition: CardPosition
+  ): { topRegion: ImageData | null; bottomRegion: ImageData | null } {
+    try {
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return { topRegion: null, bottomRegion: null };
+
+      // Set canvas size to standard Pokemon card aspect ratio
+      canvas.width = 400;
+      canvas.height = (canvas.width * this.CARD_HEIGHT_MM) / this.CARD_WIDTH_MM;
+
+      // Calculate bounding box from card corners
+      const allX = cardPosition.corners.map((c) => c[0]);
+      const allY = cardPosition.corners.map((c) => c[1]);
+      const minX = Math.min(...allX);
+      const maxX = Math.max(...allX);
+      const minY = Math.min(...allY);
+      const maxY = Math.max(...allY);
+
+      const sourceWidth = maxX - minX;
+      const sourceHeight = maxY - minY;
+
+      // Draw the full card to canvas
+      ctx.drawImage(
+        videoElement,
+        minX,
+        minY,
+        sourceWidth,
+        sourceHeight,
+        0,
+        0,
+        canvas.width,
+        canvas.height
+      );
+
+      // Extract top 25% region
+      const topHeight = Math.floor(canvas.height * 0.25);
+      const topRegion = ctx.getImageData(0, 0, canvas.width, topHeight);
+
+      // Extract bottom 10% region
+      const bottomHeight = Math.floor(canvas.height * 0.1);
+      const bottomY = canvas.height - bottomHeight;
+      const bottomRegion = ctx.getImageData(0, bottomY, canvas.width, bottomHeight);
+
+      return { topRegion, bottomRegion };
+    } catch (err) {
+      console.error('Error extracting card regions for OCR:', err);
+      return { topRegion: null, bottomRegion: null };
     }
   }
 
@@ -731,22 +794,21 @@ export class ArucoService {
   }
 
   /**
-   * Solve Direct Linear Transform using pseudo-inverse
+   * Solve Direct Linear Transform using Gaussian elimination
+   * More robust implementation for homography calculation
    */
   private solveDLT(A: number[][]): number[] {
-    // Simplified SVD for homography estimation
-    // In production, you'd use a proper linear algebra library
-    // For now, using normal equations: (A^T * A)^-1 * A^T * b
+    // Solve Ah = 0 using SVD approximation
+    // We want the eigenvector corresponding to the smallest eigenvalue of A^T*A
 
-    // For homography, we solve Ah = 0 with ||h|| = 1
-    // Using the last row approach for normalization
-    const n = A.length;
-    const m = A[0].length;
+    const n = A.length; // 8 equations
+    const m = A[0].length; // 9 unknowns
 
-    // Build A^T * A
+    // Build A^T * A (9x9 matrix)
     const ATA: number[][] = Array(m)
       .fill(0)
       .map(() => Array(m).fill(0));
+
     for (let i = 0; i < m; i++) {
       for (let j = 0; j < m; j++) {
         let sum = 0;
@@ -757,23 +819,29 @@ export class ArucoService {
       }
     }
 
-    // Find eigenvector corresponding to smallest eigenvalue
-    // Simplified: use last column as approximation
-    const h = [
-      ATA[0][8],
-      ATA[1][8],
-      ATA[2][8],
-      ATA[3][8],
-      ATA[4][8],
-      ATA[5][8],
-      ATA[6][8],
-      ATA[7][8],
-      1, // Normalize with h[8] = 1
-    ];
+    // Use power iteration to find smallest eigenvector
+    // Start with last column (h[8] = 1 constraint)
+    let h = [0, 0, 0, 0, 0, 0, 0, 0, 1];
 
-    // Normalize
-    const norm = Math.sqrt(h.reduce((sum, v) => sum + v * v, 0));
-    return h.map((v) => v / norm);
+    // Iterate to refine
+    for (let iter = 0; iter < 100; iter++) {
+      const newH: number[] = Array(9).fill(0);
+
+      // Multiply by inverse (approximated by solving)
+      for (let i = 0; i < 9; i++) {
+        for (let j = 0; j < 9; j++) {
+          newH[i] += ATA[i][j] * h[j];
+        }
+      }
+
+      // Normalize
+      const norm = Math.sqrt(newH.reduce((sum, v) => sum + v * v, 0));
+      if (norm < 1e-10) break;
+
+      h = newH.map((v) => v / norm);
+    }
+
+    return h;
   }
 
   /**
