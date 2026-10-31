@@ -356,6 +356,7 @@ export class CameraPreviewComponent implements OnDestroy {
         );
         if (cardImageUrl) {
           this.cardPreviewUrl.set(cardImageUrl);
+          this.lastExtractedMarkerCount = detectedMarkers.length;
           console.log(
             `✅ Extracted card preview with ${
               detectedMarkers.length
@@ -369,10 +370,10 @@ export class CameraPreviewComponent implements OnDestroy {
           // Pause scanning for 5 seconds after card detection
           this.cardDetectionPauseUntil = Date.now() + 5000;
         }
-      } else {
-        this.cardPreviewUrl.set(null);
-        this.recognizedData.set({});
       }
+      // TODO: Add logic to clear preview when card is intentionally removed
+      // For now, keep the preview to make debugging easier
+      // If we have fewer markers than before, keep the existing preview
     }, 1000); // 1 FPS (once per second)
   }
 
